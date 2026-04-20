@@ -1,0 +1,16 @@
+[Unit]
+Description=MolmoPoint-8B API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@/molmopoint
+ExecStart=/usr/bin/bash @REPO_DIR@/molmopoint/molmopoint-run.sh
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
