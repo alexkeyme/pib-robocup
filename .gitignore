@@ -134,6 +134,13 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Local LangGraph + Next
+langgraph-venv/
+web/node_modules/
+web/.next/
+web/.env.local
+run/
+
 # Environments
 .env
 .envrc
