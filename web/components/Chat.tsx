@@ -86,6 +86,8 @@ export function Chat() {
   const [molmoResults, setMolmoResults] = useState<MolmoChatResult[]>([]);
   /** Image URL (blob) for the last request that had an upload — used for Molmo overlay (not agent-driven). */
   const [molmoOverlayImageUrl, setMolmoOverlayImageUrl] = useState<string | null>(null);
+  /** When Molmo has points, user can show/hide the side image+markers (default off). */
+  const [molmoReplyOverlayVisible, setMolmoReplyOverlayVisible] = useState(false);
   const [toolCallLog, setToolCallLog] = useState<ToolCallLogEntry[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const msgImageUrlsRef = useRef<string[]>([]);
@@ -164,6 +166,7 @@ export function Chat() {
     }));
     setMessages([...history, { role: "assistant", content: "" }]);
     setMolmoResults([]);
+    setMolmoReplyOverlayVisible(false);
     setToolCallLog([]);
     setSending(true);
     scrollToBottom();
@@ -350,10 +353,11 @@ export function Chat() {
         )}
         {messages.map((m, i) => {
           const isLastAssistant = m.role === "assistant" && i === messages.length - 1;
-          const showMolmoOverlay =
+          const canMolmoSideOverlay =
             isLastAssistant &&
             molmoOverlayImageUrl != null &&
             mergedMolmoPointsForOverlay.length > 0;
+          const showMolmoSideLayout = canMolmoSideOverlay && molmoReplyOverlayVisible;
           if (m.role === "user") {
             return (
               <div
@@ -384,7 +388,18 @@ export function Chat() {
               className="w-full max-w-[100%] self-start rounded-lg bg-foreground/5 px-3 py-2"
             >
               <div className="text-xs font-medium text-foreground/50">assistant</div>
-              {showMolmoOverlay ? (
+              {canMolmoSideOverlay && (
+                <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-xs text-foreground/70">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 rounded border-foreground/30 text-foreground accent-foreground"
+                    checked={molmoReplyOverlayVisible}
+                    onChange={(e) => setMolmoReplyOverlayVisible(e.target.checked)}
+                  />
+                  <span>Show Molmo point map beside reply</span>
+                </label>
+              )}
+              {showMolmoSideLayout ? (
                 <div className="mt-1 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
                   <div className="min-w-0 flex-1 whitespace-pre-wrap text-sm leading-relaxed">
                     {m.content}
@@ -394,14 +409,22 @@ export function Chat() {
                       Molmo detections (from tool result, not Gemma)
                     </p>
                     <ImageWithPointOverlay
-                      imageUrl={molmoOverlayImageUrl}
+                      imageUrl={molmoOverlayImageUrl!}
                       points={mergedMolmoPointsForOverlay}
                       alt="User image with Molmo point overlay"
                     />
                   </div>
                 </div>
               ) : (
-                <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
+                <div
+                  className={
+                    canMolmoSideOverlay
+                      ? "mt-1 whitespace-pre-wrap text-sm leading-relaxed"
+                      : "whitespace-pre-wrap text-sm leading-relaxed"
+                  }
+                >
+                  {m.content}
+                </div>
               )}
             </div>
           );
