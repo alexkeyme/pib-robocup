@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { WebcamCaptureButton } from "@/components/WebcamCaptureButton";
 
 type Role = "user" | "assistant" | "system";
 
@@ -467,9 +468,13 @@ export function Chat() {
             </div>
           </div>
         )}
-        <div className="flex gap-2">
-          <label className="shrink-0 cursor-pointer rounded-md border border-foreground/20 px-3 py-2 text-sm text-foreground/85 hover:bg-foreground/5">
-            Image
+        <div className="flex flex-wrap items-center gap-2">
+          <WebcamCaptureButton
+            onCapture={setImageFile}
+            disabled={sending}
+          />
+          <label className="shrink-0 cursor-pointer text-sm text-foreground/55 underline decoration-foreground/25 underline-offset-2 hover:text-foreground/80">
+            choose file
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp"
