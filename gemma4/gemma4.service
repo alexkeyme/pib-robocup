@@ -1,0 +1,19 @@
+[Unit]
+Description=Gemma 4 llama-server (Docker)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f gemma4
+WorkingDirectory=@REPO_DIR@/gemma4
+ExecStart=/usr/bin/bash @REPO_DIR@/gemma4/gemma4-run.sh
+ExecStop=-/usr/bin/docker stop -t 20 gemma4
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=30
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
