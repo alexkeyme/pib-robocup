@@ -22,6 +22,14 @@ type MolmoChatResult = {
   error?: string;
 };
 
+type ToolCallLogEntry = {
+  clientKey: string;
+  id?: string;
+  name?: string;
+  args?: string;
+  result?: string;
+};
+
 const API_BASE =
   process.env.NEXT_PUBLIC_LANGGRAPH_API_URL || "http://127.0.0.1:8008";
 
@@ -38,8 +46,10 @@ export function Chat() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [molmoResults, setMolmoResults] = useState<MolmoChatResult[]>([]);
+  const [toolCallLog, setToolCallLog] = useState<ToolCallLogEntry[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const msgImageUrlsRef = useRef<string[]>([]);
+  const nextToolKey = useRef(0);
 
   useEffect(() => {
     if (!imageFile) {
@@ -98,6 +108,7 @@ export function Chat() {
     }));
     setMessages([...history, { role: "assistant", content: "" }]);
     setMolmoResults([]);
+    setToolCallLog([]);
     setSending(true);
     scrollToBottom();
 
@@ -153,6 +164,8 @@ export function Chat() {
             error?: string;
             done?: boolean;
             molmo_result?: MolmoChatResult;
+            tool_call?: { id?: string; name?: string; args?: string | null };
+            tool_result?: { id?: string; name?: string; content?: string };
           };
           try {
             data = JSON.parse(payload);
@@ -163,6 +176,75 @@ export function Chat() {
           if (data.molmo_result) {
             const mr = data.molmo_result;
             setMolmoResults((prev) => [...prev, mr]);
+            scrollToBottom();
+            continue;
+          }
+          if (data.tool_call) {
+            const tc = data.tool_call;
+            setToolCallLog((prev) => {
+              const id = tc.id;
+              if (id) {
+                const idx = prev.findIndex((e) => e.id === id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  const cur = next[idx]!;
+                  next[idx] = {
+                    ...cur,
+                    name: tc.name ?? cur.name,
+                    args: tc.args ?? cur.args,
+                  };
+                  return next;
+                }
+                return [
+                  ...prev,
+                  { clientKey: `tc-${id}`, id, name: tc.name, args: tc.args ?? undefined },
+                ];
+              }
+              const k = `tmp-${nextToolKey.current++}`;
+              return [
+                ...prev,
+                {
+                  clientKey: k,
+                  name: tc.name,
+                  args: tc.args ?? undefined,
+                },
+              ];
+            });
+            scrollToBottom();
+            continue;
+          }
+          if (data.tool_result) {
+            const tr = data.tool_result;
+            setToolCallLog((prev) => {
+              const id = tr.id;
+              if (id) {
+                const idx = prev.findIndex((e) => e.id === id);
+                if (idx >= 0) {
+                  const next = [...prev];
+                  const cur = next[idx]!;
+                  next[idx] = {
+                    ...cur,
+                    name: tr.name ?? cur.name,
+                    result: tr.content ?? cur.result,
+                  };
+                  return next;
+                }
+                return [
+                  ...prev,
+                  {
+                    clientKey: `tr-${id}`,
+                    id,
+                    name: tr.name,
+                    result: tr.content,
+                  },
+                ];
+              }
+              const k = `tr-tmp-${nextToolKey.current++}`;
+              return [
+                ...prev,
+                { clientKey: k, name: tr.name, result: tr.content },
+              ];
+            });
             scrollToBottom();
             continue;
           }
@@ -239,6 +321,31 @@ export function Chat() {
         {error && (
           <div className="rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
             {error}
+          </div>
+        )}
+        {toolCallLog.length > 0 && (
+          <div className="space-y-2 rounded-lg border border-foreground/15 bg-foreground/5 p-3">
+            <h2 className="text-sm font-medium text-foreground/90">Tool calls (agent)</h2>
+            <ul className="space-y-2 text-xs text-foreground/80">
+              {toolCallLog.map((t) => (
+                <li key={t.clientKey} className="rounded border border-foreground/10 bg-background/40 p-2">
+                  <div className="font-mono text-[11px] text-foreground/55">
+                    {t.name ? <span className="text-foreground/80">{t.name}</span> : "(unnamed tool)"}
+                    {t.id ? <span className="text-foreground/45"> · id {t.id}</span> : null}
+                  </div>
+                  {t.args ? (
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-foreground/75">
+                      args: {t.args}
+                    </pre>
+                  ) : null}
+                  {t.result ? (
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-foreground/75">
+                      result: {t.result}
+                    </pre>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
         {molmoResults.length > 0 && (

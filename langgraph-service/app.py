@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -330,6 +331,50 @@ def _token_text(chunk: Any) -> str | None:
     return None
 
 
+def _tool_result_preview_for_ui(content: Any, max_len: int = 4000) -> str:
+    if isinstance(content, str):
+        s = content
+    else:
+        try:
+            s = json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            s = str(content)
+    s = s.strip()
+    if len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
+
+def _iter_ai_toolcall_sse_lines(chunk: Any) -> list[str]:
+    """Convert AIMessageChunk tool-call streaming into UI-friendly JSON SSE lines."""
+    if not isinstance(chunk, AIMessageChunk):
+        return []
+    tcs = getattr(chunk, "tool_call_chunks", None) or []
+    if not tcs:
+        return []
+    out: list[str] = []
+    for tc in tcs:
+        if not isinstance(tc, dict):
+            continue
+        tid = tc.get("id")
+        name = tc.get("name")
+        arg_fragment = tc.get("args")
+        if name or arg_fragment is not None:
+            out.append(
+                json.dumps(
+                    {
+                        "tool_call": {
+                            "id": tid,
+                            "name": name,
+                            "args": arg_fragment,
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    return out
+
+
 async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
     async for line in _stream_body_with_image(req):
         yield line
@@ -358,6 +403,8 @@ async def _stream_body_with_image(
                 chunk, _ = item
             else:
                 chunk = item
+            for sse_line in _iter_ai_toolcall_sse_lines(chunk):
+                yield f"data: {sse_line}\n\n"
             if isinstance(chunk, ToolMessageChunk):
                 if chunk.name and chunk.name not in MOLMO_TOOL_NAMES:
                     pass
@@ -382,14 +429,24 @@ async def _stream_body_with_image(
                 chunk, ToolMessageChunk
             ):
                 tid = chunk.tool_call_id
-                if tid in molmo_sent:
-                    pass
-                else:
-                    molmo = _molmo_from_tool_message(chunk)
-                    if molmo is not None:
-                        molmo_sent.add(tid)
-                        line = json.dumps({"molmo_result": molmo})
-                        yield f"data: {line}\n\n"
+                if chunk.name and chunk.name not in MOLMO_TOOL_NAMES:
+                    tr = {
+                        "tool_result": {
+                            "id": tid,
+                            "name": chunk.name,
+                            "content": _tool_result_preview_for_ui(chunk.content),
+                        }
+                    }
+                    yield f"data: {json.dumps(tr, ensure_ascii=False)}\n\n"
+                elif chunk.name in MOLMO_TOOL_NAMES:
+                    if tid in molmo_sent:
+                        pass
+                    else:
+                        molmo = _molmo_from_tool_message(chunk)
+                        if molmo is not None:
+                            molmo_sent.add(tid)
+                            line = json.dumps({"molmo_result": molmo})
+                            yield f"data: {line}\n\n"
             if isinstance(chunk, (ToolMessage, ToolMessageChunk)):
                 continue
             text = _token_text(chunk)
