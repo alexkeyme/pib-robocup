@@ -21,6 +21,8 @@ type MolmoChatResult = {
   device?: string;
   model_id?: string;
   error?: string;
+  image_width?: number;
+  image_height?: number;
 };
 
 type ToolCallLogEntry = {
@@ -37,6 +39,47 @@ const API_BASE =
 function formatPointCell(v: number) {
   if (Number.isNaN(v)) return "—";
   return v.toFixed(4);
+}
+
+function hasImageDims(m: MolmoChatResult) {
+  const w = Number(m.image_width);
+  const h = Number(m.image_height);
+  return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0;
+}
+
+/** Molmo may return 0–1 or pixels. Prefer API values; derive missing 0–1 or px from image size when present. */
+function molmoPointCells(p: MolmoPoint, m: MolmoChatResult) {
+  const rawX = Number(p.x);
+  const rawY = Number(p.y);
+  const looksPixel = rawX > 1 || rawY > 1;
+  const dims = hasImageDims(m);
+  const iw = Number(m.image_width);
+  const ih = Number(m.image_height);
+
+  if (!looksPixel) {
+    const x01 = rawX;
+    const y01 = rawY;
+    return {
+      x01,
+      y01,
+      xPx: dims ? x01 * iw : Number.NaN,
+      yPx: dims ? y01 * ih : Number.NaN,
+    };
+  }
+  if (dims) {
+    return {
+      x01: rawX / iw,
+      y01: rawY / ih,
+      xPx: rawX,
+      yPx: rawY,
+    };
+  }
+  return {
+    x01: Number.NaN,
+    y01: Number.NaN,
+    xPx: rawX,
+    yPx: rawY,
+  };
 }
 
 export function Chat() {
@@ -355,9 +398,10 @@ export function Chat() {
               MolmoPoint (tool) — 0–1 in image space; not from Gemma
             </h2>
             <p className="text-xs text-foreground/55">
-              Absolute (px) columns are only filled when the API still returns pixel coords; for 0–1
-              only, use the <strong className="text-foreground/70">Molmo (local) upload</strong> panel
-              to see <strong>px</strong> from the known image size.
+              Coordinates are 0–1 in image space when the backend normalizes them, or from pixel
+              values using <strong className="text-foreground/70">image size</strong> from the
+              tool when included. Pixels (last columns) are shown when the point is in pixel space
+              or when size is known for converted 0–1 values.
             </p>
             {molmoResults.map((m, i) => (
               <div key={i} className="space-y-1.5 text-sm">
@@ -393,17 +437,17 @@ export function Chat() {
                           <th className="p-1.5 pr-2 font-medium">image</th>
                           <th className="p-1.5 pr-2 font-medium">x (0–1)</th>
                           <th className="p-1.5 pr-2 font-medium">y (0–1)</th>
-                          <th className="p-1.5 pr-2 font-medium" title="From API if pixel coords, else em dash">
+                          <th className="p-1.5 pr-2 font-medium" title="Pixel x: from API in pixel space, or derived from 0–1 × width when image size is known">
                             x (px)
                           </th>
-                          <th className="p-1.5 font-medium" title="From API if pixel coords, else em dash">
+                          <th className="p-1.5 font-medium" title="Pixel y: from API in pixel space, or derived from 0–1 × height when image size is known">
                             y (px)
                           </th>
                         </tr>
                       </thead>
                       <tbody>
                         {m.points.map((p, j) => {
-                          const looksPixel = p.x > 1 || p.y > 1;
+                          const c = molmoPointCells(p, m);
                           return (
                           <tr key={j} className="border-b border-foreground/5 last:border-0">
                             <td className="p-1.5 pr-2 tabular-nums text-foreground/80">
@@ -412,20 +456,16 @@ export function Chat() {
                             <td className="p-1.5 pr-2 tabular-nums">{p.object_id}</td>
                             <td className="p-1.5 pr-2 tabular-nums">{p.image_index}</td>
                             <td className="p-1.5 pr-2 tabular-nums">
-                              {looksPixel ? "—" : formatPointCell(p.x)}
+                              {formatPointCell(c.x01)}
                             </td>
                             <td className="p-1.5 pr-2 tabular-nums">
-                              {looksPixel ? "—" : formatPointCell(p.y)}
+                              {formatPointCell(c.y01)}
                             </td>
                             <td className="p-1.5 pr-2 tabular-nums text-foreground/70">
-                              {looksPixel
-                                ? p.x.toFixed(1)
-                                : "—"}
+                              {Number.isNaN(c.xPx) ? "—" : c.xPx.toFixed(1)}
                             </td>
                             <td className="p-1.5 tabular-nums text-foreground/70">
-                              {looksPixel
-                                ? p.y.toFixed(1)
-                                : "—"}
+                              {Number.isNaN(c.yPx) ? "—" : c.yPx.toFixed(1)}
                             </td>
                           </tr>
                           );

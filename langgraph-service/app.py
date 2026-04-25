@@ -27,7 +27,12 @@ from langchain_core.messages import (
 )
 from pydantic import BaseModel, Field
 
-from molmo_tool import call_molmo_point, molmo_service_reachable
+from molmo_tool import (
+    call_molmo_point,
+    enrich_molmo_result_for_client,
+    get_image_dimensions,
+    molmo_service_reachable,
+)
 from state_graph import build_agent, prepare_for_model
 
 GEMMA_HEALTH_URLS = [
@@ -156,6 +161,8 @@ MOLMO_TOOL_NAMES = {"molmo_point_localize", "molmo_point_localize_uploaded"}
 
 def _parse_molmo_tool_content(content: Any) -> dict[str, Any] | None:
     """Parse JSON or plain error string from `molmo_point_localize` tool return."""
+    if isinstance(content, dict):
+        return content
     if not isinstance(content, str):
         return None
     s = content.strip()
@@ -195,6 +202,13 @@ def _try_complete_molmo_json(s: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return _parse_molmo_tool_content(s)
+
+
+def _molmo_payload_for_sse(
+    p: dict[str, Any], upload_dims: tuple[int, int] | None
+) -> dict[str, Any]:
+    """For chat-with-image, force known image size + 0–1 points into every SSE `molmo_result` event."""
+    return enrich_molmo_result_for_client(p, upload_dims)
 
 
 def _collect_molmo_results(messages: list[Any]) -> list[dict[str, Any]]:
@@ -289,13 +303,18 @@ async def molmo_localize(
     if isinstance(out, str):
         raise HTTPException(status_code=502, detail=out)
 
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "points": out.get("points", []),
         "generated_text": out.get("generated_text", ""),
         "device": out.get("device", ""),
         "model_id": out.get("model_id", ""),
     }
+    if out.get("image_width") is not None:
+        payload["image_width"] = out["image_width"]
+    if out.get("image_height") is not None:
+        payload["image_height"] = out["image_height"]
+    return payload
 
 
 @app.post("/chat")
@@ -391,6 +410,9 @@ async def _stream_body_with_image(
         return
     msgs = prepare_for_model(lc, uploaded_image_path)
     agent = get_agent(uploaded_image_path)
+    upload_dims: tuple[int, int] | None = None
+    if uploaded_image_path:
+        upload_dims = get_image_dimensions(Path(uploaded_image_path))
     molmo_tmc_merged: dict[str, ToolMessageChunk] = {}
     molmo_sent: set[str] = set()
     try:
@@ -415,15 +437,22 @@ async def _stream_body_with_image(
                     molmo_tmc_merged[tid] = merged
                     nm = merged.name
                     c = merged.content
-                    if (nm in MOLMO_TOOL_NAMES or (nm is None and isinstance(c, str))):
-                        p = _try_complete_molmo_json(c) if isinstance(c, str) else None
+                    if nm in MOLMO_TOOL_NAMES or (nm is None and isinstance(c, (str, dict))):
+                        p: dict[str, Any] | None = None
+                        if isinstance(c, dict) and (
+                            nm in MOLMO_TOOL_NAMES or _is_molmo_tool_result_dict(c)
+                        ):
+                            p = c
+                        elif isinstance(c, str):
+                            p = _try_complete_molmo_json(c)
                         if (
                             p is not None
                             and (nm in MOLMO_TOOL_NAMES or _is_molmo_tool_result_dict(p))
                             and tid not in molmo_sent
                         ):
                             molmo_sent.add(tid)
-                            line = json.dumps({"molmo_result": p})
+                            p_out = _molmo_payload_for_sse(p, upload_dims)
+                            line = json.dumps({"molmo_result": p_out})
                             yield f"data: {line}\n\n"
             if isinstance(chunk, ToolMessage) and not isinstance(
                 chunk, ToolMessageChunk
@@ -445,7 +474,8 @@ async def _stream_body_with_image(
                         molmo = _molmo_from_tool_message(chunk)
                         if molmo is not None:
                             molmo_sent.add(tid)
-                            line = json.dumps({"molmo_result": molmo})
+                            molmo_out = _molmo_payload_for_sse(molmo, upload_dims)
+                            line = json.dumps({"molmo_result": molmo_out})
                             yield f"data: {line}\n\n"
             if isinstance(chunk, (ToolMessage, ToolMessageChunk)):
                 continue
