@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { normalizeMolmoXY } from "@/lib/molmoDisplay";
+import { absoluteFromNormalized, normalizeMolmoXY } from "@/lib/molmoDisplay";
 import { ImageWithPointOverlay, type MolmoPoint } from "./ImageWithPointOverlay";
 
 const API_BASE =
@@ -167,8 +167,13 @@ export function MolmoLocalizePanel() {
             </p>
           )}
           {result && points.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-foreground/55">
+                <strong className="text-foreground/70">Absolute pixels</strong> = normalized ×
+                (image width, height) for the file you selected (same frame Molmo used).
+              </p>
             <div className="overflow-x-auto rounded border border-foreground/10">
-              <table className="w-full min-w-[18rem] border-collapse text-left text-xs">
+              <table className="w-full min-w-[24rem] border-collapse text-left text-xs">
                 <thead>
                     <tr className="border-b border-foreground/10 bg-foreground/5">
                     <th className="px-2 py-1.5 font-medium">#</th>
@@ -180,6 +185,18 @@ export function MolmoLocalizePanel() {
                     <th className="px-2 py-1.5 font-medium" title="0–1 in image height">
                       y (0–1)
                     </th>
+                    <th
+                      className="px-2 py-1.5 font-medium"
+                      title="Pixel position: x(0–1) × image width (same as Molmo’s pixel space for this file)"
+                    >
+                      x (px)
+                    </th>
+                    <th
+                      className="px-2 py-1.5 font-medium"
+                      title="Pixel position: y(0–1) × image height"
+                    >
+                      y (px)
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -190,6 +207,12 @@ export function MolmoLocalizePanel() {
                       imageNatural.w,
                       imageNatural.h
                     );
+                    const abs = absoluteFromNormalized(
+                      nx,
+                      ny,
+                      imageNatural.w,
+                      imageNatural.h
+                    );
                     return (
                     <tr key={`row-${pt.object_id}-${pt.image_index}-${i}`} className="border-b border-foreground/5">
                       <td className="px-2 py-1.5 font-medium">{i + 1}</td>
@@ -197,11 +220,18 @@ export function MolmoLocalizePanel() {
                       <td className="px-2 py-1.5 tabular-nums">{pt.image_index}</td>
                       <td className="px-2 py-1.5 tabular-nums">{nx.toFixed(4)}</td>
                       <td className="px-2 py-1.5 tabular-nums">{ny.toFixed(4)}</td>
+                      <td className="px-2 py-1.5 tabular-nums">
+                        {abs ? abs.ax.toFixed(1) : "—"}
+                      </td>
+                      <td className="px-2 py-1.5 tabular-nums">
+                        {abs ? abs.ay.toFixed(1) : "—"}
+                      </td>
                     </tr>
                     );
                   })}
                 </tbody>
               </table>
+            </div>
             </div>
           )}
           {result && points.length === 0 && (
