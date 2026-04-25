@@ -13,6 +13,7 @@ TimeoutStartSec=0
 KillMode=process
 Environment=GEMMA_BASE_URL=http://127.0.0.1:8080/v1
 Environment=GEMMA_PORT=8080
+Environment=MOLMO_BASE_URL=http://127.0.0.1:8010
 
 [Install]
 WantedBy=multi-user.target

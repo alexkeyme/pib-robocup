@@ -7,6 +7,8 @@ from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from molmo_tool import molmo_point_localize
+
 
 def get_llm() -> ChatOpenAI:
     base_url = os.environ.get("GEMMA_BASE_URL", "http://127.0.0.1:8080/v1")
@@ -41,9 +43,9 @@ def prepare_for_model(msgs: Sequence[BaseMessage]) -> list[BaseMessage]:
 
 
 def build_agent():
-    """Return a compiled agent graph: model loop with optional tools; currently no tools.
-
-    `tools=None` yields an agent with a model node and no tool-calling loop, matching
-    the previous single-node StateGraph.
-    """
-    return create_agent(get_llm(), tools=None, system_prompt=None)
+    """Return a compiled agent graph: Gemma + MolmoPoint localization tool (HTTP to :8010)."""
+    return create_agent(
+        get_llm(),
+        tools=[molmo_point_localize],
+        system_prompt=None,
+    )

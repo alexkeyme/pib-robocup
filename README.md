@@ -9,7 +9,7 @@ sudo ./setup/setup-langgraph.sh
 ```
 
 - **Gemma** (OpenAI-compatible HTTP): `http://127.0.0.1:8080` — used only from the host; the browser talks to Next.js and the LangGraph API.
-- **LangGraph API**: `http://127.0.0.1:8008` — `GET /health`, `POST /chat`, `POST /chat/stream` (SSE).
+- **LangGraph API**: `http://127.0.0.1:8008` — `GET /health` (includes `gemma` and `molmo`), `POST /chat`, `POST /chat/stream` (SSE). The agent can call **MolmoPoint** (port **8010**) for object localization on a local image path; see [langgraph-service/README.md](langgraph-service/README.md).
 - **Chat UI**: `http://127.0.0.1:3000` (binds on `0.0.0.0`, so other machines on the LAN can use `http://<host-ip>:3000`).
 
 Configuration and env vars for the Python service: [langgraph-service/README.md](langgraph-service/README.md).
@@ -32,4 +32,4 @@ Stop including Gemma:
 sudo ./setup/setup-langgraph-stop.sh --gemma
 ```
 
-Full PIB stack (Gemma, MolmoPoint, etc.) is installed with [setup/setup-pib.sh](setup/setup-pib.sh); it is **not** required for the LangGraph chat path.
+Full PIB stack (Gemma, MolmoPoint, etc.) is installed with [setup/setup-pib.sh](setup/setup-pib.sh). Basic LangGraph + Next chat only needs [setup/setup-langgraph.sh](setup/setup-langgraph.sh), but **MolmoPoint** (and the `molmo_point_localize` tool) requires MolmoPoint to be up—typically from `setup-pib` or a manual `molmopoint` service.

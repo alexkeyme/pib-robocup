@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from molmo_tool import molmo_service_reachable
 from state_graph import build_agent, prepare_for_model
 
 GEMMA_HEALTH_URLS = [
@@ -113,6 +114,7 @@ def health():
     return {
         "ok": True,
         "gemma": _gemma_reachable(),
+        "molmo": molmo_service_reachable(),
     }
 
 
