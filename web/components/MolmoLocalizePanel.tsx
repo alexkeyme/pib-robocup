@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import { normalizeMolmoXY } from "@/lib/molmoDisplay";
 import { ImageWithPointOverlay, type MolmoPoint } from "./ImageWithPointOverlay";
 
 const API_BASE =
@@ -21,6 +22,7 @@ export function MolmoLocalizePanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<LocalizeResult | null>(null);
+  const [imageNatural, setImageNatural] = useState({ w: 0, h: 0 });
 
   useEffect(() => {
     if (!file) {
@@ -39,6 +41,20 @@ export function MolmoLocalizePanel() {
       URL.revokeObjectURL(u);
     };
   }, [file]);
+
+  useEffect(() => {
+    if (!previewUrl) {
+      setImageNatural({ w: 0, h: 0 });
+      return;
+    }
+    const img = new window.Image();
+    img.onload = () =>
+      setImageNatural({ w: img.naturalWidth, h: img.naturalHeight });
+    img.src = previewUrl;
+    return () => {
+      img.onload = null;
+    };
+  }, [previewUrl]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -84,8 +100,12 @@ export function MolmoLocalizePanel() {
         text chat.
       </p>
       <p className="mb-3 text-xs text-foreground/65">
-        Upload an image and describe what to find. Markers on the image match the “#” column in the
-        table (same order as returned by MolmoPoint). Coordinates are normalized 0–1 in image space.
+        Upload an image and <strong>ask where something is</strong> (e.g. &quot;Where is the red
+        cup?&quot; or &quot;Point to the left door handle&quot;). Generic prompts like
+        &quot;describe the image&quot; return <strong>no</strong> <code>points</code> because
+        the model does not emit Molmo’s point tags—only a caption. Markers and the table use the
+        same order as MolmoPoint; the API may return x/y as pixel coords; the UI normalizes to
+        0–1 for display.
       </p>
       <form onSubmit={onSubmit} className="mb-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
         <label className="block min-w-0 text-xs">
@@ -150,44 +170,74 @@ export function MolmoLocalizePanel() {
             <div className="overflow-x-auto rounded border border-foreground/10">
               <table className="w-full min-w-[18rem] border-collapse text-left text-xs">
                 <thead>
-                  <tr className="border-b border-foreground/10 bg-foreground/5">
+                    <tr className="border-b border-foreground/10 bg-foreground/5">
                     <th className="px-2 py-1.5 font-medium">#</th>
                     <th className="px-2 py-1.5 font-medium">object_id</th>
                     <th className="px-2 py-1.5 font-medium">image_index</th>
-                    <th className="px-2 py-1.5 font-medium">x</th>
-                    <th className="px-2 py-1.5 font-medium">y</th>
+                    <th className="px-2 py-1.5 font-medium" title="0–1 in image width">
+                      x (0–1)
+                    </th>
+                    <th className="px-2 py-1.5 font-medium" title="0–1 in image height">
+                      y (0–1)
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {points.map((pt, i) => (
+                  {points.map((pt, i) => {
+                    const { nx, ny } = normalizeMolmoXY(
+                      pt.x,
+                      pt.y,
+                      imageNatural.w,
+                      imageNatural.h
+                    );
+                    return (
                     <tr key={`row-${pt.object_id}-${pt.image_index}-${i}`} className="border-b border-foreground/5">
                       <td className="px-2 py-1.5 font-medium">{i + 1}</td>
                       <td className="px-2 py-1.5 tabular-nums">{pt.object_id}</td>
                       <td className="px-2 py-1.5 tabular-nums">{pt.image_index}</td>
-                      <td className="px-2 py-1.5 tabular-nums">{pt.x.toFixed(4)}</td>
-                      <td className="px-2 py-1.5 tabular-nums">{pt.y.toFixed(4)}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{nx.toFixed(4)}</td>
+                      <td className="px-2 py-1.5 tabular-nums">{ny.toFixed(4)}</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
           {result && points.length === 0 && (
-            <p className="text-xs text-foreground/60">No points returned (empty list).</p>
+            <div className="space-y-1.5 text-xs text-foreground/60">
+              <p>
+                <strong className="text-foreground/75">No coordinates in the response.</strong> A
+                non-empty <code>points</code> list is only returned when the model’s answer includes
+                Molmo <strong>pointing</strong> markup (e.g. after a &quot;where / point to&quot;
+                style prompt). <strong>Caption or chat-style prompts</strong> usually yield{" "}
+                <code>points: []</code> with plain text in the raw output—try rephrasing to ask for a
+                location. See the raw model text below; if the model did not output Molmo
+                <code className="mx-0.5">&lt;points …&gt;</code>-style point markup, the extractor
+                has nothing to turn into <code>points</code>.
+              </p>
+            </div>
           )}
-          {result?.generated_text ? (
-            <details className="text-xs text-foreground/70">
-              <summary className="cursor-pointer">
-                MolmoPoint – raw text (model output before point extraction; debugging)
+          {result && (
+            <details
+              className="text-xs text-foreground/70"
+              open={points.length === 0}
+            >
+              <summary className="cursor-pointer text-foreground/80">
+                MolmoPoint – raw model text (before point extraction; not Gemma)
               </summary>
               <p className="mb-1 mt-1 text-foreground/55">
-                From the same Molmo-8B run as the table above — not from Gemma.
+                This is the same string Molmo-8B generated on port 8010. Point extraction is applied to
+                this text; if the model did not output pointable tokens, you get an empty{" "}
+                <code>points</code> list even when this block has content.
               </p>
-              <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-foreground/10 bg-foreground/5 p-2">
-                {result.generated_text}
+              <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded border border-foreground/10 bg-foreground/5 p-2 text-foreground/85">
+                {(result.generated_text ?? "").length > 0
+                  ? result.generated_text
+                  : "(empty — model returned no text, or the field was missing)"}
               </pre>
             </details>
-          ) : null}
+          )}
         </div>
       )}
     </div>

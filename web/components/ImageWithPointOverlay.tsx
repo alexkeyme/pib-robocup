@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+import { normalizeMolmoXY } from "@/lib/molmoDisplay";
+
 export type MolmoPoint = {
   object_id: number;
   image_index: number;
@@ -28,25 +31,37 @@ function chipColorForObjectId(objectId: number): string {
 }
 
 /**
- * Renders the image and overlays markers; assumes x,y are normalized 0..1 in image space
- * (top-left origin) as returned by MolmoPoint. Display numbers (#) match 1..n in `points` order.
+ * Renders the image and overlays markers. `x`/`y` are expected 0..1 in image space; if either
+ * is &gt; 1, values are treated as **pixels** in the natural image and divided by the loaded
+ * image size (for APIs that return pixel coords as MolmoPoint’s HTTP does).
  */
 export function ImageWithPointOverlay({ imageUrl, points, alt = "Upload" }: Props) {
+  const [imgSize, setImgSize] = useState({ w: 0, h: 0 });
+
   return (
     <div className="relative inline-block max-w-full align-top">
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={imageUrl} alt={alt} className="max-h-[min(50vh,480px)] w-auto max-w-full rounded border border-foreground/15" />
+      <img
+        src={imageUrl}
+        alt={alt}
+        className="max-h-[min(50vh,480px)] w-auto max-w-full rounded border border-foreground/15"
+        onLoad={(e) => {
+          const el = e.currentTarget;
+          setImgSize({ w: el.naturalWidth, h: el.naturalHeight });
+        }}
+      />
       {points.map((pt, i) => {
+        const { nx, ny } = normalizeMolmoXY(pt.x, pt.y, imgSize.w, imgSize.h);
         const displayNum = i + 1;
         const bg = chipColorForObjectId(pt.object_id);
-        const label = `Detection ${displayNum}: object_id=${pt.object_id}, image_index=${pt.image_index}, x=${pt.x.toFixed(4)}, y=${pt.y.toFixed(4)}`;
+        const label = `Detection ${displayNum}: object_id=${pt.object_id}, image_index=${pt.image_index}, x=${nx.toFixed(4)}, y=${ny.toFixed(4)} (normalized 0-1 in image space)`;
         return (
           <div
             key={`${pt.object_id}-${pt.image_index}-${i}`}
             className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2"
             style={{
-              left: `${pt.x * 100}%`,
-              top: `${pt.y * 100}%`,
+              left: `${nx * 100}%`,
+              top: `${ny * 100}%`,
             }}
             title={label}
             role="img"

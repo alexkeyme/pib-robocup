@@ -44,6 +44,28 @@ def _validate_image_path(image_path: str) -> Path | str:
     return p
 
 
+def _normalize_molmo_points_in_place(points: list[object], width: int, height: int) -> None:
+    """MolmoPoint returns x,y in **pixel** space for the input image; UI expects 0..1.
+
+    If either coordinate is > 1, treat as pixels and scale by (width, height). Purely
+    normalized outputs (0..1) are left unchanged.
+    """
+    if width <= 0 or height <= 0:
+        return
+    w, h = float(width), float(height)
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        try:
+            x = float(p.get("x", 0.0))
+            y = float(p.get("y", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if x > 1.0 or y > 1.0:
+            p["x"] = x / w
+            p["y"] = y / h
+
+
 def call_molmo_point(image_path: str, prompt: str) -> dict | str:
     """POST /point. Returns JSON dict on success, or error str."""
     v = _validate_image_path(image_path)
@@ -68,9 +90,19 @@ def call_molmo_point(image_path: str, prompt: str) -> dict | str:
         return f"MolmoPoint error HTTP {r.status_code}: {detail!s}"
 
     try:
-        return r.json()
+        out = r.json()
     except Exception as e:
         return f"Invalid JSON from MolmoPoint: {e!s}"
+    if isinstance(out, dict) and isinstance(out.get("points"), list) and out["points"]:
+        try:
+            from PIL import Image
+
+            with Image.open(str(v)) as im:
+                wi, hi = im.size
+            _normalize_molmo_points_in_place(out["points"], wi, hi)
+        except (OSError, ImportError, ValueError):
+            pass
+    return out
 
 
 @tool
@@ -85,12 +117,13 @@ def molmo_point_localize(image_path: str, prompt: str) -> str:
     out = call_molmo_point(image_path, prompt)
     if isinstance(out, str):
         return out
-    # Compact payload for the LLM
+    # Compact payload for the LLM (include coordinates; same fields as /molmo/localize)
     return json.dumps(
         {
             "points": out.get("points", []),
             "generated_text": out.get("generated_text", ""),
             "device": out.get("device", ""),
+            "model_id": out.get("model_id", ""),
         },
         ensure_ascii=False,
     )

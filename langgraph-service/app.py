@@ -15,7 +15,14 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    ToolMessageChunk,
+)
 from pydantic import BaseModel, Field
 
 from molmo_tool import call_molmo_point, molmo_service_reachable
@@ -106,6 +113,62 @@ def _to_lc_messages(items: list[Msg]) -> list[BaseMessage]:
             out.append(SystemMessage(content=m.content))
         else:
             raise HTTPException(status_code=400, detail=f"Unknown role: {m.role!r}")
+    return out
+
+
+MOLMO_TOOL_NAME = "molmo_point_localize"
+
+
+def _parse_molmo_tool_content(content: Any) -> dict[str, Any] | None:
+    """Parse JSON or plain error string from `molmo_point_localize` tool return."""
+    if not isinstance(content, str):
+        return None
+    s = content.strip()
+    if s.startswith("{"):
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return {"error": s}
+    return {"error": s}
+
+
+def _molmo_from_tool_message(m: ToolMessage) -> dict[str, Any] | None:
+    if m.name != MOLMO_TOOL_NAME:
+        return None
+    return _parse_molmo_tool_content(m.content)
+
+
+def _is_molmo_tool_result_dict(p: dict[str, Any]) -> bool:
+    """Distinguish molmo_point_localize JSON from other tools when `name` is missing."""
+    if "points" in p and isinstance(p.get("points"), list):
+        return True
+    if "generated_text" in p:
+        return True
+    if "error" in p and len(p) == 1:
+        return True
+    return False
+
+
+def _try_complete_molmo_json(s: str) -> dict[str, Any] | None:
+    s = s.strip()
+    if not s.startswith("{"):
+        if s:
+            return _parse_molmo_tool_content(s)
+        return None
+    try:
+        json.loads(s)
+    except json.JSONDecodeError:
+        return None
+    return _parse_molmo_tool_content(s)
+
+
+def _collect_molmo_results(messages: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        if isinstance(m, ToolMessage) and m.name == MOLMO_TOOL_NAME:
+            p = _molmo_from_tool_message(m)
+            if p is not None:
+                out.append(p)
     return out
 
 
@@ -212,7 +275,11 @@ def chat_post(req: ChatRequest):
         text = _last_assistant_text(out["messages"])
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
-    return {"message": {"role": "assistant", "content": text}}
+    molmo_results = _collect_molmo_results(out["messages"])
+    base: dict[str, Any] = {"message": {"role": "assistant", "content": text}}
+    if molmo_results:
+        base["molmo_results"] = molmo_results
+    return base
 
 
 def _token_text(chunk: Any) -> str | None:
@@ -231,6 +298,8 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
         return
     msgs = prepare_for_model(lc)
     agent = get_agent()
+    molmo_tmc_merged: dict[str, ToolMessageChunk] = {}
+    molmo_sent: set[str] = set()
     try:
         async for item in agent.astream(
             {"messages": msgs},
@@ -241,6 +310,40 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
                 chunk, _ = item
             else:
                 chunk = item
+            if isinstance(chunk, ToolMessageChunk):
+                if chunk.name and chunk.name != MOLMO_TOOL_NAME:
+                    pass
+                else:
+                    tid = chunk.tool_call_id
+                    prev = molmo_tmc_merged.get(tid)
+                    merged = (prev + chunk) if prev is not None else chunk
+                    molmo_tmc_merged[tid] = merged
+                    nm = merged.name
+                    c = merged.content
+                    if (nm == MOLMO_TOOL_NAME or (nm is None and isinstance(c, str))):
+                        p = _try_complete_molmo_json(c) if isinstance(c, str) else None
+                        if (
+                            p is not None
+                            and (nm == MOLMO_TOOL_NAME or _is_molmo_tool_result_dict(p))
+                            and tid not in molmo_sent
+                        ):
+                            molmo_sent.add(tid)
+                            line = json.dumps({"molmo_result": p})
+                            yield f"data: {line}\n\n"
+            if isinstance(chunk, ToolMessage) and not isinstance(
+                chunk, ToolMessageChunk
+            ):
+                tid = chunk.tool_call_id
+                if tid in molmo_sent:
+                    pass
+                else:
+                    molmo = _molmo_from_tool_message(chunk)
+                    if molmo is not None:
+                        molmo_sent.add(tid)
+                        line = json.dumps({"molmo_result": molmo})
+                        yield f"data: {line}\n\n"
+            if isinstance(chunk, (ToolMessage, ToolMessageChunk)):
+                continue
             text = _token_text(chunk)
             if text:
                 line = json.dumps({"token": text})

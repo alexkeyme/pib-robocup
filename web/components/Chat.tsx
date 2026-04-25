@@ -6,14 +6,35 @@ type Role = "user" | "assistant" | "system";
 
 type Msg = { role: Role; content: string };
 
+type MolmoPoint = {
+  object_id: number;
+  image_index: number;
+  x: number;
+  y: number;
+};
+
+type MolmoChatResult = {
+  points?: MolmoPoint[];
+  generated_text?: string;
+  device?: string;
+  model_id?: string;
+  error?: string;
+};
+
 const API_BASE =
   process.env.NEXT_PUBLIC_LANGGRAPH_API_URL || "http://127.0.0.1:8008";
+
+function formatPointCell(v: number) {
+  if (Number.isNaN(v)) return "—";
+  return v.toFixed(4);
+}
 
 export function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [molmoResults, setMolmoResults] = useState<MolmoChatResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
 
   function scrollToBottom() {
@@ -33,6 +54,7 @@ export function Chat() {
     const userMsg: Msg = { role: "user", content: text };
     const history: Msg[] = [...messages, userMsg];
     setMessages([...history, { role: "assistant", content: "" }]);
+    setMolmoResults([]);
     setSending(true);
     scrollToBottom();
 
@@ -67,13 +89,24 @@ export function Chat() {
           if (!trimmed.startsWith("data:")) continue;
           const payload = trimmed.slice(5).trim();
           if (!payload) continue;
-          let data: { token?: string; error?: string; done?: boolean };
+          let data: {
+            token?: string;
+            error?: string;
+            done?: boolean;
+            molmo_result?: MolmoChatResult;
+          };
           try {
             data = JSON.parse(payload);
           } catch {
             continue;
           }
           if (data.error) throw new Error(data.error);
+          if (data.molmo_result) {
+            const mr = data.molmo_result;
+            setMolmoResults((prev) => [...prev, mr]);
+            scrollToBottom();
+            continue;
+          }
           if (data.token) {
             acc += data.token;
             setMessages((prev) => {
@@ -134,6 +167,73 @@ export function Chat() {
         {error && (
           <div className="rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
             {error}
+          </div>
+        )}
+        {molmoResults.length > 0 && (
+          <div className="space-y-3 rounded-lg border border-foreground/15 bg-foreground/5 p-3">
+            <h2 className="text-sm font-medium text-foreground/90">
+              MolmoPoint (tool) — points are normalized 0–1, not from Gemma
+            </h2>
+            {molmoResults.map((m, i) => (
+              <div key={i} className="space-y-1.5 text-sm">
+                {m.error && (
+                  <p className="text-red-300">
+                    {m.error}
+                  </p>
+                )}
+                {(m.model_id || m.device) && (
+                  <p className="text-xs text-foreground/60">
+                    {m.model_id ? (
+                      <>
+                        <span className="text-foreground/80">Model:</span>{" "}
+                        <code className="break-all">{m.model_id}</code>
+                        {m.device ? " · " : null}
+                      </>
+                    ) : null}
+                    {m.device ? (
+                      <>
+                        <span className="text-foreground/80">Device:</span>{" "}
+                        <code>{m.device}</code>
+                      </>
+                    ) : null}
+                  </p>
+                )}
+                {m.points && m.points.length > 0 && (
+                  <div className="overflow-x-auto rounded border border-foreground/10">
+                    <table className="w-full min-w-[18rem] text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-foreground/10 text-foreground/50">
+                          <th className="p-1.5 pr-2 font-medium">#</th>
+                          <th className="p-1.5 pr-2 font-medium">object_id</th>
+                          <th className="p-1.5 pr-2 font-medium">image</th>
+                          <th className="p-1.5 pr-2 font-medium">x</th>
+                          <th className="p-1.5 font-medium">y</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {m.points.map((p, j) => (
+                          <tr key={j} className="border-b border-foreground/5 last:border-0">
+                            <td className="p-1.5 pr-2 tabular-nums text-foreground/80">
+                              {j + 1}
+                            </td>
+                            <td className="p-1.5 pr-2 tabular-nums">{p.object_id}</td>
+                            <td className="p-1.5 pr-2 tabular-nums">{p.image_index}</td>
+                            <td className="p-1.5 pr-2 tabular-nums">{formatPointCell(p.x)}</td>
+                            <td className="p-1.5 tabular-nums">{formatPointCell(p.y)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {m.generated_text && (
+                  <p className="whitespace-pre-wrap break-words text-xs text-foreground/70">
+                    <span className="text-foreground/50">raw text: </span>
+                    {m.generated_text}
+                  </p>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
