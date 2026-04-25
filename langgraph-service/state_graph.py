@@ -33,9 +33,11 @@ def _uploaded_image_system(uploaded_image_path: str) -> SystemMessage:
     return SystemMessage(
         content=(
             "A user image is attached for this turn and stored on the server at "
-            f"{uploaded_image_path}. When image understanding is needed, call tool "
-            "`molmo_point_localize_uploaded` with a precise prompt that describes what to locate. "
-            "Do not invent coordinates or tool outputs."
+            f"{uploaded_image_path}. For Molmo (pointing / localization) you MUST use tool "
+            "`molmo_point_localize_uploaded` only. Do not call any other tool that needs an image "
+            "file path, and do not invent a path like `input_file_0.png` — the server already "
+            "has the file. When needed, call `molmo_point_localize_uploaded` with a short prompt "
+            "naming the object/region to locate. Do not invent coordinates or tool outputs."
         )
     )
 
@@ -86,9 +88,10 @@ def _build_uploaded_image_tool(uploaded_image_path: str):
 
 def build_agent(uploaded_image_path: str | None = None):
     """Return a compiled agent graph: Gemma + MolmoPoint localization tool (HTTP to :8010)."""
-    tools = [molmo_point_localize]
     if uploaded_image_path:
-        tools.append(_build_uploaded_image_tool(uploaded_image_path))
+        tools = [_build_uploaded_image_tool(uploaded_image_path)]
+    else:
+        tools = [molmo_point_localize]
     return create_agent(
         get_llm(),
         tools=tools,
