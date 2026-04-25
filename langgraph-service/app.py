@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
@@ -59,8 +60,10 @@ app.add_middleware(
 _agent: Any = None
 
 
-def get_agent():
+def get_agent(uploaded_image_path: str | None = None):
     global _agent
+    if uploaded_image_path:
+        return build_agent(uploaded_image_path)
     if _agent is None:
         _agent = build_agent()
     return _agent
@@ -82,12 +85,43 @@ MOLMO_ALLOWED_FILE_TYPES: dict[str, str] = {
     "image/webp": ".webp",
 }
 
+_MOLMO_UPLOAD_DIR: Path | None = None
+
+
+def _dir_writable(p: Path) -> bool:
+    return os.access(p, os.W_OK)
+
+
+def _default_repo_upload_dir() -> Path:
+    return (Path(__file__).resolve().parent.parent / "run" / "molmo-uploads").resolve()
+
+
+def _fallback_temp_upload_dir() -> Path:
+    return (
+        Path(tempfile.gettempdir())
+        / f"pib-robocup-1-molmo-uploads-{os.getuid()}"
+    ).resolve()
+
 
 def _molmo_upload_dir() -> Path:
+    global _MOLMO_UPLOAD_DIR
+    if _MOLMO_UPLOAD_DIR is not None:
+        return _MOLMO_UPLOAD_DIR
     raw = os.environ.get("MOLMO_UPLOAD_DIR", "").strip()
     if raw:
-        return Path(raw).expanduser().resolve()
-    return (Path(__file__).resolve().parent.parent / "run" / "molmo-uploads").resolve()
+        p = Path(raw).expanduser().resolve()
+    else:
+        p = _default_repo_upload_dir()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        p = _fallback_temp_upload_dir()
+        p.mkdir(parents=True, exist_ok=True)
+    if not _dir_writable(p):
+        p = _fallback_temp_upload_dir()
+        p.mkdir(parents=True, exist_ok=True)
+    _MOLMO_UPLOAD_DIR = p
+    return p
 
 
 def _gemma_reachable() -> bool:
@@ -116,7 +150,7 @@ def _to_lc_messages(items: list[Msg]) -> list[BaseMessage]:
     return out
 
 
-MOLMO_TOOL_NAME = "molmo_point_localize"
+MOLMO_TOOL_NAMES = {"molmo_point_localize", "molmo_point_localize_uploaded"}
 
 
 def _parse_molmo_tool_content(content: Any) -> dict[str, Any] | None:
@@ -133,7 +167,7 @@ def _parse_molmo_tool_content(content: Any) -> dict[str, Any] | None:
 
 
 def _molmo_from_tool_message(m: ToolMessage) -> dict[str, Any] | None:
-    if m.name != MOLMO_TOOL_NAME:
+    if m.name not in MOLMO_TOOL_NAMES:
         return None
     return _parse_molmo_tool_content(m.content)
 
@@ -165,11 +199,42 @@ def _try_complete_molmo_json(s: str) -> dict[str, Any] | None:
 def _collect_molmo_results(messages: list[Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for m in messages:
-        if isinstance(m, ToolMessage) and m.name == MOLMO_TOOL_NAME:
+        if isinstance(m, ToolMessage) and m.name in MOLMO_TOOL_NAMES:
             p = _molmo_from_tool_message(m)
             if p is not None:
                 out.append(p)
     return out
+
+
+async def _read_upload_image_bytes(file: UploadFile) -> tuple[bytes, str]:
+    body = b""
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        body += chunk
+        if len(body) > MOLMO_MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="file too large")
+    if not body:
+        raise HTTPException(status_code=400, detail="empty file")
+    ct = (file.content_type or "").split(";")[0].strip() or mimetypes.guess_type(
+        file.filename or ""
+    )[0]
+    if not ct or ct not in MOLMO_ALLOWED_FILE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="unsupported or missing image type; use jpeg, png, or webp",
+        )
+    return body, MOLMO_ALLOWED_FILE_TYPES[ct]
+
+
+async def _save_uploaded_image(file: UploadFile) -> Path:
+    body, ext = await _read_upload_image_bytes(file)
+    dest_dir = _molmo_upload_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{uuid.uuid4().hex}{ext}"
+    dest.write_bytes(body)
+    return dest
 
 
 def _last_assistant_text(messages: list[Any]) -> str:
@@ -211,32 +276,8 @@ async def molmo_localize(
     if len(p) > 4000:
         raise HTTPException(status_code=400, detail="prompt too long")
 
-    body = b""
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        body += chunk
-        if len(body) > MOLMO_MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="file too large")
-
-    if not body:
-        raise HTTPException(status_code=400, detail="empty file")
-
-    ct = (file.content_type or "").split(";")[0].strip() or mimetypes.guess_type(
-        file.filename or ""
-    )[0]
-    if not ct or ct not in MOLMO_ALLOWED_FILE_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail="unsupported or missing image type; use jpeg, png, or webp",
-        )
-    ext = MOLMO_ALLOWED_FILE_TYPES[ct]
-    dest_dir = _molmo_upload_dir()
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{uuid.uuid4().hex}{ext}"
+    dest = await _save_uploaded_image(file)
     try:
-        dest.write_bytes(body)
         out = call_molmo_point(str(dest), p)
     finally:
         try:
@@ -290,14 +331,21 @@ def _token_text(chunk: Any) -> str | None:
 
 
 async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
+    async for line in _stream_body_with_image(req):
+        yield line
+
+
+async def _stream_body_with_image(
+    req: ChatRequest, uploaded_image_path: str | None = None
+) -> AsyncIterator[str]:
     try:
         lc = _to_lc_messages(req.messages)
     except HTTPException as e:
         err = json.dumps({"error": e.detail})
         yield f"data: {err}\n\n"
         return
-    msgs = prepare_for_model(lc)
-    agent = get_agent()
+    msgs = prepare_for_model(lc, uploaded_image_path)
+    agent = get_agent(uploaded_image_path)
     molmo_tmc_merged: dict[str, ToolMessageChunk] = {}
     molmo_sent: set[str] = set()
     try:
@@ -311,7 +359,7 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
             else:
                 chunk = item
             if isinstance(chunk, ToolMessageChunk):
-                if chunk.name and chunk.name != MOLMO_TOOL_NAME:
+                if chunk.name and chunk.name not in MOLMO_TOOL_NAMES:
                     pass
                 else:
                     tid = chunk.tool_call_id
@@ -320,11 +368,11 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
                     molmo_tmc_merged[tid] = merged
                     nm = merged.name
                     c = merged.content
-                    if (nm == MOLMO_TOOL_NAME or (nm is None and isinstance(c, str))):
+                    if (nm in MOLMO_TOOL_NAMES or (nm is None and isinstance(c, str))):
                         p = _try_complete_molmo_json(c) if isinstance(c, str) else None
                         if (
                             p is not None
-                            and (nm == MOLMO_TOOL_NAME or _is_molmo_tool_result_dict(p))
+                            and (nm in MOLMO_TOOL_NAMES or _is_molmo_tool_result_dict(p))
                             and tid not in molmo_sent
                         ):
                             molmo_sent.add(tid)
@@ -359,6 +407,41 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
 def chat_stream(req: ChatRequest):
     return StreamingResponse(
         _stream_body(req),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/chat/stream-with-image")
+async def chat_stream_with_image(
+    file: UploadFile = File(...),
+    messages_json: str = Form(...),
+):
+    try:
+        parsed = json.loads(messages_json)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"messages_json must be valid JSON: {e!s}") from e
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="messages_json must be a JSON array")
+    try:
+        req = ChatRequest(messages=[Msg.model_validate(m) for m in parsed])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid message payload: {e!s}") from e
+
+    uploaded = await _save_uploaded_image(file)
+
+    async def stream() -> AsyncIterator[str]:
+        try:
+            async for line in _stream_body_with_image(req, str(uploaded)):
+                yield line
+        finally:
+            try:
+                uploaded.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return StreamingResponse(
+        stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )

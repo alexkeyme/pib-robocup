@@ -1,10 +1,11 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 type Role = "user" | "assistant" | "system";
 
-type Msg = { role: Role; content: string };
+type Msg = { role: Role; content: string; imageUrl?: string; imageName?: string };
+type ChatPayloadMsg = { role: Role; content: string };
 
 type MolmoPoint = {
   object_id: number;
@@ -32,10 +33,39 @@ function formatPointCell(v: number) {
 export function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [composerImagePreviewUrl, setComposerImagePreviewUrl] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [molmoResults, setMolmoResults] = useState<MolmoChatResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
+  const msgImageUrlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    if (!imageFile) {
+      setComposerImagePreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      return;
+    }
+    const u = URL.createObjectURL(imageFile);
+    setComposerImagePreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return u;
+    });
+    return () => {
+      URL.revokeObjectURL(u);
+    };
+  }, [imageFile]);
+
+  useEffect(
+    () => () => {
+      for (const u of msgImageUrlsRef.current) URL.revokeObjectURL(u);
+      if (composerImagePreviewUrl) URL.revokeObjectURL(composerImagePreviewUrl);
+    },
+    [composerImagePreviewUrl]
+  );
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -46,27 +76,56 @@ export function Chat() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || sending) return;
+    if ((!text && !imageFile) || sending) return;
 
     setError(null);
     setInput("");
 
-    const userMsg: Msg = { role: "user", content: text };
+    const sentImage = imageFile;
+    setImageFile(null);
+    const sentImageUrl = sentImage ? URL.createObjectURL(sentImage) : undefined;
+    if (sentImageUrl) msgImageUrlsRef.current.push(sentImageUrl);
+    const userMsg: Msg = {
+      role: "user",
+      content: text || "Uploaded an image.",
+      imageUrl: sentImageUrl,
+      imageName: sentImage?.name,
+    };
     const history: Msg[] = [...messages, userMsg];
+    const historyPayload: ChatPayloadMsg[] = history.map(({ role, content }) => ({
+      role,
+      content,
+    }));
     setMessages([...history, { role: "assistant", content: "" }]);
     setMolmoResults([]);
     setSending(true);
     scrollToBottom();
 
     try {
-      const res = await fetch(`${API_BASE}/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
-      });
+      let res: Response;
+      if (sentImage) {
+        const fd = new FormData();
+        fd.append("file", sentImage);
+        fd.append("messages_json", JSON.stringify(historyPayload));
+        res = await fetch(`${API_BASE}/chat/stream-with-image`, {
+          method: "POST",
+          body: fd,
+        });
+      } else {
+        res = await fetch(`${API_BASE}/chat/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: historyPayload }),
+        });
+      }
 
       if (!res.ok) {
         const t = await res.text();
+        if (sentImage && res.status === 404) {
+          throw new Error(
+            "Image chat endpoint is unavailable on the running backend. Restart langgraph-service to load /chat/stream-with-image."
+          );
+        }
         throw new Error(t || res.statusText);
       }
 
@@ -161,6 +220,19 @@ export function Chat() {
             }
           >
             <div className="text-xs font-medium text-foreground/50">{m.role}</div>
+            {m.imageUrl && (
+              <div className="mb-2 space-y-1">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={m.imageUrl}
+                  alt={m.imageName || "uploaded image"}
+                  className="max-h-48 rounded border border-foreground/15"
+                />
+                {m.imageName && (
+                  <div className="text-[11px] text-foreground/55">{m.imageName}</div>
+                )}
+              </div>
+            )}
             <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
           </div>
         ))}
@@ -266,21 +338,54 @@ export function Chat() {
         )}
       </div>
 
-      <form onSubmit={onSubmit} className="flex gap-2">
+      <form onSubmit={onSubmit} className="space-y-2">
+        {composerImagePreviewUrl && (
+          <div className="inline-flex items-start gap-2 rounded border border-foreground/15 bg-foreground/5 p-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={composerImagePreviewUrl}
+              alt={imageFile?.name || "Selected image"}
+              className="max-h-20 rounded border border-foreground/10"
+            />
+            <div className="space-y-1">
+              <p className="text-xs text-foreground/70">{imageFile?.name || "selected image"}</p>
+              <button
+                type="button"
+                className="rounded border border-foreground/20 px-2 py-1 text-xs text-foreground/80 hover:bg-foreground/5"
+                onClick={() => setImageFile(null)}
+                disabled={sending}
+              >
+                Remove image
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <label className="shrink-0 cursor-pointer rounded-md border border-foreground/20 px-3 py-2 text-sm text-foreground/85 hover:bg-foreground/5">
+            Image
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="hidden"
+              onChange={(e) => setImageFile(e.target.files?.[0] ?? null)}
+              disabled={sending}
+            />
+          </label>
         <input
           className="min-w-0 flex-1 rounded-md border border-foreground/15 bg-background px-3 py-2 text-sm outline-none ring-0 focus:border-foreground/30"
-          placeholder="Message…"
+          placeholder="Message (optionally attach image)…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={sending}
         />
         <button
           type="submit"
-          disabled={sending || !input.trim()}
+          disabled={sending || (!input.trim() && !imageFile)}
           className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-40"
         >
           {sending ? "…" : "Send"}
         </button>
+        </div>
       </form>
     </div>
   );
