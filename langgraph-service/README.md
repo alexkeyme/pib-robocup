@@ -6,7 +6,9 @@ FastAPI app (`app.py`) runs an agent built with **`langchain.agents.create_agent
 
 - **`molmo_point_localize`**: calls the local **MolmoPoint** HTTP service `POST /point` ([molmopoint/molmopoint-server.py](../molmopoint/molmopoint-server.py)) with a host-local `image_path` and a `prompt` describing what to find. The tool returns JSON with a `points` list: `object_id`, `image_index`, `x`, `y` (and optional `generated_text` from the model).
 - MolmoPoint must be running separately (e.g. `systemctl status molmopoint.service` on port **8010**), typically after [setup/setup-pib.sh](../setup/setup-pib.sh). [setup/setup-langgraph.sh](../setup/setup-langgraph.sh) does **not** start MolmoPoint.
-- **Local image files only:** the chat API does not upload images. The model must be given a **filesystem path** the host can read (e.g. a frame written under `/data/...`). Set **`MOLMO_ALLOWED_PATH_PREFIX`** in production to restrict which paths the tool will forward to MolmoPoint.
+- **Chat + tool path:** the model can be given a **filesystem path** (e.g. under `/data/...`). Set **`MOLMO_ALLOWED_PATH_PREFIX`** in production to restrict which paths the tool will forward to MolmoPoint.
+- **Direct upload (Next.js):** `POST /molmo/localize` accepts **multipart** `file` + form field `prompt`. The service writes the file under `run/molmo-uploads/` (or `MOLMO_UPLOAD_DIR`), calls MolmoPoint, returns `points` and `generated_text`, then **deletes** the temp file. The Next app shows the image from a browser `ObjectURL` and draws **x/y markers** (assumed normalized 0–1). If you set `MOLMO_ALLOWED_PATH_PREFIX`, ensure the upload directory resolves under that prefix (or set `MOLMO_UPLOAD_DIR` accordingly).
+- **Clarification:** The `generated_text` field in MolmoPoint’s response (and in `/molmo/localize` JSON) comes from the **Molmo-8B** model inside the MolmoPoint process — the same run that produces `points` via `extract_image_points`. It is **not** output from **Gemma** (llama-server on port 8080). The chat UI uses Gemma separately; the Molmo panel in Next.js is labeled accordingly.
 
 ## System prompt
 
@@ -32,12 +34,15 @@ Gemma/llama.cpp must expose **OpenAI-style tool / function calls** in the chat A
 | `MOLMO_BASE_URL` | `http://127.0.0.1:8010` | MolmoPoint base URL (no path suffix) |
 | `MOLMO_TIMEOUT_SECONDS` | `120` | HTTP timeout for `POST /point` |
 | `MOLMO_ALLOWED_PATH_PREFIX` | _(empty)_ | If set, `image_path` must resolve under this directory (security) |
+| `MOLMO_UPLOAD_DIR` | `<repo>/run/molmo-uploads` | Temp storage for `POST /molmo/localize` |
+| `MOLMO_MAX_UPLOAD_BYTES` | `20971520` (20 MiB) | Max upload size |
 | `CORS_EXTRA_ORIGINS` | _(empty)_ | Comma-separated browser origins for the Next.js app |
 
 The repository uses [setup/setup-langgraph.sh](../setup/setup-langgraph.sh) to create `langgraph-venv`, install dependencies, start `gemma4.service`, and install/start this service via [langgraph.service](langgraph.service).
 
 ## API
 
-- `GET /health` — `ok`, `gemma` (llama up), `molmo` (MolmoPoint `/health` or `/` responds)
+- `GET /health` — `ok`, `gemma` (llama up), `molmo` (MolmoPoint `/health` returns 200 when the model is ready)
+- `POST /molmo/localize` — `multipart/form-data`: `file` (jpeg/png/webp), `prompt` (string). Response: `{ "ok", "points", "generated_text", "device", "model_id" }`
 - `POST /chat` — JSON `{ "messages": [ { "role", "content" } ] }`
 - `POST /chat/stream` — SSE: `data: {"token": "..."} `, then `data: {"done": true}`

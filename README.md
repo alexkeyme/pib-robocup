@@ -10,7 +10,7 @@ sudo ./setup/setup-langgraph.sh
 
 - **Gemma** (OpenAI-compatible HTTP): `http://127.0.0.1:8080` — used only from the host; the browser talks to Next.js and the LangGraph API.
 - **LangGraph API**: `http://127.0.0.1:8008` — `GET /health` (includes `gemma` and `molmo`), `POST /chat`, `POST /chat/stream` (SSE). The agent can call **MolmoPoint** (port **8010**) for object localization on a local image path; see [langgraph-service/README.md](langgraph-service/README.md).
-- **Chat UI**: `http://127.0.0.1:3000` (binds on `0.0.0.0`, so other machines on the LAN can use `http://<host-ip>:3000`).
+- **Chat UI**: `http://127.0.0.1:3000` (binds on `0.0.0.0`, so other machines on the LAN can use `http://<host-ip>:3000`). The home page includes **MolmoPoint**: image upload + prompt, then coordinates overlaid on the preview (via `POST /molmo/localize` on the LangGraph API). MolmoPoint must be running on **8010** for that flow.
 
 Configuration and env vars for the Python service: [langgraph-service/README.md](langgraph-service/README.md).
 

@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from molmo_tool import molmo_service_reachable
+from molmo_tool import call_molmo_point, molmo_service_reachable
 from state_graph import build_agent, prepare_for_model
 
 GEMMA_HEALTH_URLS = [
@@ -63,6 +66,21 @@ class Msg(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[Msg] = Field(min_length=1)
+
+
+MOLMO_MAX_UPLOAD_BYTES = int(os.environ.get("MOLMO_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+MOLMO_ALLOWED_FILE_TYPES: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+def _molmo_upload_dir() -> Path:
+    raw = os.environ.get("MOLMO_UPLOAD_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent / "run" / "molmo-uploads").resolve()
 
 
 def _gemma_reachable() -> bool:
@@ -115,6 +133,63 @@ def health():
         "ok": True,
         "gemma": _gemma_reachable(),
         "molmo": molmo_service_reachable(),
+    }
+
+
+@app.post("/molmo/localize")
+async def molmo_localize(
+    file: UploadFile = File(...),
+    prompt: str = Form(...),
+):
+    """Save an uploaded image to disk, run MolmoPoint, return points (and delete the temp file)."""
+    p = (prompt or "").strip()
+    if not p:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    if len(p) > 4000:
+        raise HTTPException(status_code=400, detail="prompt too long")
+
+    body = b""
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        body += chunk
+        if len(body) > MOLMO_MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="file too large")
+
+    if not body:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    ct = (file.content_type or "").split(";")[0].strip() or mimetypes.guess_type(
+        file.filename or ""
+    )[0]
+    if not ct or ct not in MOLMO_ALLOWED_FILE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="unsupported or missing image type; use jpeg, png, or webp",
+        )
+    ext = MOLMO_ALLOWED_FILE_TYPES[ct]
+    dest_dir = _molmo_upload_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{uuid.uuid4().hex}{ext}"
+    try:
+        dest.write_bytes(body)
+        out = call_molmo_point(str(dest), p)
+    finally:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if isinstance(out, str):
+        raise HTTPException(status_code=502, detail=out)
+
+    return {
+        "ok": True,
+        "points": out.get("points", []),
+        "generated_text": out.get("generated_text", ""),
+        "device": out.get("device", ""),
+        "model_id": out.get("model_id", ""),
     }
 
 

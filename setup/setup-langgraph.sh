@@ -164,7 +164,7 @@ stop_next_if_pidfile() {
 start_next_dev() {
   require_cmd node
   require_cmd npm
-  install -d -m 0755 "${REPO_DIR}/run" "${REPO_DIR}/web"
+  install -d -m 0755 "${REPO_DIR}/run" "${REPO_DIR}/run/molmo-uploads" "${REPO_DIR}/web"
   stop_next_if_pidfile
   (cd "${REPO_DIR}/web" && npm install)
   write_next_env
