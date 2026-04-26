@@ -1,5 +1,6 @@
+# langchain>=1.0 is required for langchain.agents.create_agent
+langchain>=1.0.0
 langgraph>=0.2.0
-langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 fastapi>=0.115.0

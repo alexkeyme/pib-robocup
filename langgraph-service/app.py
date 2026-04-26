@@ -1,4 +1,4 @@
-"""FastAPI: health, /chat, /chat/stream (SSE) — LangGraph + local OpenAI-compatible Gemma (llama-server)."""
+"""FastAPI: health, /chat, /chat/stream (SSE) — create_agent + local OpenAI-compatible Gemma (llama-server)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -14,12 +15,14 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from state_graph import build_graph, get_llm, prepare_for_model
+from state_graph import build_agent, prepare_for_model
 
 GEMMA_HEALTH_URLS = [
     f"http://127.0.0.1:{os.environ.get('GEMMA_PORT', '8080')}/health",
     f"http://127.0.0.1:{os.environ.get('GEMMA_PORT', '8080')}/",
 ]
+
+
 def _cors_origins() -> list[str]:
     o = [
         "http://localhost:3000",
@@ -42,14 +45,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_compiled: Any = None
+_agent: Any = None
 
 
-def get_compiled():
-    global _compiled
-    if _compiled is None:
-        _compiled = build_graph()
-    return _compiled
+def get_agent():
+    global _agent
+    if _agent is None:
+        _agent = build_agent()
+    return _agent
 
 
 class Msg(BaseModel):
@@ -87,6 +90,24 @@ def _to_lc_messages(items: list[Msg]) -> list[BaseMessage]:
     return out
 
 
+def _last_assistant_text(messages: list[Any]) -> str:
+    """Last AIMessage with user-visible text, skipping tool-only assistant turns if present."""
+    for m in reversed(messages):
+        if not isinstance(m, AIMessage):
+            continue
+        if getattr(m, "tool_calls", None):
+            continue
+        c = m.content
+        if isinstance(c, str) and c:
+            return c
+        if c is not None and c not in ("",):
+            return str(c)
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and m.content is not None:
+            return m.content if isinstance(m.content, str) else str(m.content)
+    raise ValueError("No assistant content in result")
+
+
 @app.get("/health")
 def health():
     return {
@@ -101,19 +122,30 @@ def chat_post(req: ChatRequest):
         lc = _to_lc_messages(req.messages)
     except HTTPException:
         raise
+    msgs = prepare_for_model(lc)
     try:
-        out = get_compiled().invoke({"messages": lc})
+        out = get_agent().invoke({"messages": msgs})
     except Exception as e:
         raise HTTPException(
             status_code=502, detail=f"Gemma/LangGraph error: {e!s}"
         ) from e
-    last: AIMessage = out["messages"][-1]
-    if not isinstance(last, AIMessage):
-        last = AIMessage(content=getattr(last, "content", str(last)))
-    return {"message": {"role": "assistant", "content": last.content}}
+    if not isinstance(out, dict) or "messages" not in out:
+        raise HTTPException(status_code=502, detail="Unexpected agent result shape")
+    try:
+        text = _last_assistant_text(out["messages"])
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    return {"message": {"role": "assistant", "content": text}}
 
 
-async def _stream_body(req: ChatRequest):
+def _token_text(chunk: Any) -> str | None:
+    c = getattr(chunk, "content", None)
+    if isinstance(c, str) and c:
+        return c
+    return None
+
+
+async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
     try:
         lc = _to_lc_messages(req.messages)
     except HTTPException as e:
@@ -121,11 +153,20 @@ async def _stream_body(req: ChatRequest):
         yield f"data: {err}\n\n"
         return
     msgs = prepare_for_model(lc)
-    llm = get_llm()
+    agent = get_agent()
     try:
-        async for chunk in llm.astream(msgs):
-            if chunk.content:
-                line = json.dumps({"token": chunk.content})
+        async for item in agent.astream(
+            {"messages": msgs},
+            stream_mode="messages",
+        ):
+            chunk: Any
+            if isinstance(item, tuple) and len(item) == 2:
+                chunk, _ = item
+            else:
+                chunk = item
+            text = _token_text(chunk)
+            if text:
+                line = json.dumps({"token": text})
                 yield f"data: {line}\n\n"
     except Exception as e:
         err = json.dumps({"error": str(e)})

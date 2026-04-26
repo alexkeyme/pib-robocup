@@ -1,13 +1,11 @@
-"""Minimal LangGraph: one LLM node over MessagesState (add_messages)."""
+"""Agent runtime via langchain.agents.create_agent (LangGraph under the hood; tools optional)."""
 
 import os
 from collections.abc import Sequence
-from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
 
 
 def get_llm() -> ChatOpenAI:
@@ -22,17 +20,17 @@ def get_llm() -> ChatOpenAI:
     )
 
 
-class State(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-
-
 def _default_system() -> str | None:
     s = os.environ.get("CHAT_SYSTEM_PROMPT", "").strip()
     return s or None
 
 
 def prepare_for_model(msgs: Sequence[BaseMessage]) -> list[BaseMessage]:
-    """Prepend optional system prompt; use in graph and /chat/stream."""
+    """Prepend optional system prompt; same semantics for invoke and /chat/stream.
+
+    `create_agent` is built with `system_prompt=None` so this remains the only place
+    we merge `CHAT_SYSTEM_PROMPT` (unless the request already includes a system message).
+    """
     for m in msgs:
         if m.type == "system":
             return list(msgs)
@@ -42,17 +40,10 @@ def prepare_for_model(msgs: Sequence[BaseMessage]) -> list[BaseMessage]:
     return list(msgs)
 
 
-def build_graph():
-    """Compile and return the chat graph (single model node)."""
-    llm = get_llm()
+def build_agent():
+    """Return a compiled agent graph: model loop with optional tools; currently no tools.
 
-    def call_model(state: State) -> dict:
-        messages = prepare_for_model(state["messages"])
-        response: AIMessage = llm.invoke(messages)  # type: ignore[assignment]
-        return {"messages": [response]}
-
-    graph = StateGraph(State)
-    graph.add_node("model", call_model)
-    graph.add_edge(START, "model")
-    graph.add_edge("model", END)
-    return graph.compile()
+    `tools=None` yields an agent with a model node and no tool-calling loop, matching
+    the previous single-node StateGraph.
+    """
+    return create_agent(get_llm(), tools=None, system_prompt=None)

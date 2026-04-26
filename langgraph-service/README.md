@@ -1,6 +1,13 @@
 # LangGraph service
 
-FastAPI app (`app.py`) compiled graph in `state_graph.py`. The model is reached via `langchain_openai.ChatOpenAI` to the local **llama.cpp** `llama-server` (Gemma 4) OpenAI-compatible API.
+FastAPI app (`app.py`) runs an agent built with **`langchain.agents.create_agent`**, which compiles to a LangGraph `CompiledStateGraph`. The chat model is **`langchain_openai.ChatOpenAI`** against the local **llama.cpp** `llama-server` (Gemma 4) OpenAI-compatible API.
+
+- **No tools today:** `create_agent(get_llm(), tools=None, system_prompt=None)` — same effective behavior as the old single-node `StateGraph` (model-only, no tool loop).
+- **Later:** pass a list of tools to `create_agent(..., tools=[...])` in `state_graph.py` for ReAct-style tool use without replacing the runtime.
+
+**System prompt:** `CHAT_SYSTEM_PROMPT` is applied in `prepare_for_model()` in `state_graph.py` (only if the request has no `system` message). `create_agent` is called with `system_prompt=None` so this logic stays in one place.
+
+**Streaming:** `POST /chat/stream` uses the **agent**’s `astream(..., stream_mode="messages")` (not a bare `ChatOpenAI.astream`), so behavior stays aligned when tools are enabled later.
 
 Environment variables (optional):
 
