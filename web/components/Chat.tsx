@@ -1,19 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { WebcamCaptureButton } from "@/components/WebcamCaptureButton";
+import { ImageWithPointOverlay, type MolmoPoint } from "@/components/ImageWithPointOverlay";
 
 type Role = "user" | "assistant" | "system";
 
 type Msg = { role: Role; content: string; imageUrl?: string; imageName?: string };
 type ChatPayloadMsg = { role: Role; content: string };
-
-type MolmoPoint = {
-  object_id: number;
-  image_index: number;
-  x: number;
-  y: number;
-};
 
 type MolmoChatResult = {
   points?: MolmoPoint[];
@@ -90,10 +84,23 @@ export function Chat() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [molmoResults, setMolmoResults] = useState<MolmoChatResult[]>([]);
+  /** Image URL (blob) for the last request that had an upload — used for Molmo overlay (not agent-driven). */
+  const [molmoOverlayImageUrl, setMolmoOverlayImageUrl] = useState<string | null>(null);
   const [toolCallLog, setToolCallLog] = useState<ToolCallLogEntry[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const msgImageUrlsRef = useRef<string[]>([]);
   const nextToolKey = useRef(0);
+
+  const mergedMolmoPointsForOverlay = useMemo((): MolmoPoint[] => {
+    const out: MolmoPoint[] = [];
+    for (const r of molmoResults) {
+      if (r.error) continue;
+      for (const pt of r.points ?? []) {
+        out.push(pt);
+      }
+    }
+    return out;
+  }, [molmoResults]);
 
   useEffect(() => {
     if (!imageFile) {
@@ -138,7 +145,12 @@ export function Chat() {
     const sentImage = imageFile;
     setImageFile(null);
     const sentImageUrl = sentImage ? URL.createObjectURL(sentImage) : undefined;
-    if (sentImageUrl) msgImageUrlsRef.current.push(sentImageUrl);
+    if (sentImageUrl) {
+      msgImageUrlsRef.current.push(sentImageUrl);
+      setMolmoOverlayImageUrl(sentImageUrl);
+    } else {
+      setMolmoOverlayImageUrl(null);
+    }
     const userMsg: Msg = {
       role: "user",
       content: text || "Uploaded an image.",
@@ -321,7 +333,7 @@ export function Chat() {
   }
 
   return (
-    <div className="mx-auto flex h-[min(90vh,720px)] max-w-2xl flex-col gap-3 px-3 py-6">
+    <div className="mx-auto flex h-[min(90vh,720px)] max-w-4xl flex-col gap-3 px-3 py-6">
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Gemma 4 (local)</h1>
         <p className="text-sm text-foreground/70">
@@ -336,32 +348,64 @@ export function Chat() {
         {messages.length === 0 && !error && (
           <p className="text-sm text-foreground/60">Send a message to start.</p>
         )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={
-              m.role === "user"
-                ? "ml-8 self-end rounded-lg bg-foreground/10 px-3 py-2"
-                : "max-w-[95%] self-start rounded-lg bg-foreground/5 px-3 py-2"
-            }
-          >
-            <div className="text-xs font-medium text-foreground/50">{m.role}</div>
-            {m.imageUrl && (
-              <div className="mb-2 space-y-1">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={m.imageUrl}
-                  alt={m.imageName || "uploaded image"}
-                  className="max-h-48 rounded border border-foreground/15"
-                />
-                {m.imageName && (
-                  <div className="text-[11px] text-foreground/55">{m.imageName}</div>
+        {messages.map((m, i) => {
+          const isLastAssistant = m.role === "assistant" && i === messages.length - 1;
+          const showMolmoOverlay =
+            isLastAssistant &&
+            molmoOverlayImageUrl != null &&
+            mergedMolmoPointsForOverlay.length > 0;
+          if (m.role === "user") {
+            return (
+              <div
+                key={i}
+                className="ml-8 self-end rounded-lg bg-foreground/10 px-3 py-2"
+              >
+                <div className="text-xs font-medium text-foreground/50">user</div>
+                {m.imageUrl && (
+                  <div className="mb-2 space-y-1">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={m.imageUrl}
+                      alt={m.imageName || "uploaded image"}
+                      className="max-h-48 rounded border border-foreground/15"
+                    />
+                    {m.imageName && (
+                      <div className="text-[11px] text-foreground/55">{m.imageName}</div>
+                    )}
+                  </div>
                 )}
+                <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
               </div>
-            )}
-            <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
-          </div>
-        ))}
+            );
+          }
+          return (
+            <div
+              key={i}
+              className="w-full max-w-[100%] self-start rounded-lg bg-foreground/5 px-3 py-2"
+            >
+              <div className="text-xs font-medium text-foreground/50">assistant</div>
+              {showMolmoOverlay ? (
+                <div className="mt-1 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
+                  <div className="min-w-0 flex-1 whitespace-pre-wrap text-sm leading-relaxed">
+                    {m.content}
+                  </div>
+                  <div className="shrink-0 sm:pl-0">
+                    <p className="mb-1.5 text-[11px] text-foreground/50">
+                      Molmo detections (from tool result, not Gemma)
+                    </p>
+                    <ImageWithPointOverlay
+                      imageUrl={molmoOverlayImageUrl}
+                      points={mergedMolmoPointsForOverlay}
+                      alt="User image with Molmo point overlay"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</div>
+              )}
+            </div>
+          );
+        })}
         {error && (
           <div className="rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
             {error}
