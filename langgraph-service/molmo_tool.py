@@ -256,9 +256,9 @@ def attach_depth_to_tool_payload(
 def molmo_point_localize(image_path: str, prompt: str) -> str:
     """Run MolmoPoint on a host-local image file to locate objects from a text description.
 
-    Use this when the user needs 2D coordinates of objects in an image. The file must
+    Use this when the user needs positions of objects in an image. The file must
     exist on the same machine as MolmoPoint; pass an absolute or resolvable path (e.g. a
-    camera frame under /data). Returns JSON with a ``points`` list: object_id, image_index, x, y.
+    camera frame under /data). Returns JSON with a ``points`` list: object_id, image_index, x, y, distance.
     If MolmoPoint is not running or the path is not allowed, the string explains the error.
     """
     out = call_molmo_point(image_path, prompt)
