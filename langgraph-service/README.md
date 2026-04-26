@@ -7,7 +7,7 @@ FastAPI app (`app.py`) runs an agent built with **`langchain.agents.create_agent
 - **`molmo_point_localize`**: calls the local **MolmoPoint** HTTP service `POST /point` ([molmopoint/molmopoint-server.py](../molmopoint/molmopoint-server.py)) with a host-local `image_path` and a `prompt` describing what to find. The tool returns JSON with a `points` list: `object_id`, `image_index`, `x`, `y` (and optional `generated_text` from the model).
 - MolmoPoint must be running separately (e.g. `systemctl status molmopoint.service` on port **8010**), typically after [setup/setup-pib.sh](../setup/setup-pib.sh). [setup/setup-langgraph.sh](../setup/setup-langgraph.sh) does **not** start MolmoPoint.
 - **Chat + tool path:** the model can be given a **filesystem path** (e.g. under `/data/...`). Set **`MOLMO_ALLOWED_PATH_PREFIX`** in production to restrict which paths the tool will forward to MolmoPoint.
-- **Direct upload (Next.js):** `POST /molmo/localize` accepts **multipart** `file` + form field `prompt`. The service writes the file under `run/molmo-uploads/` (or `MOLMO_UPLOAD_DIR`), calls MolmoPoint, returns `points` and `generated_text`, then **deletes** the temp file. The Next app shows the image from a browser `ObjectURL` and draws **x/y markers** (assumed normalized 0–1). If you set `MOLMO_ALLOWED_PATH_PREFIX`, ensure the upload directory resolves under that prefix (or set `MOLMO_UPLOAD_DIR` accordingly).
+- **Direct upload (Next.js):** `POST /molmo/localize` accepts **multipart** `file` + form field `prompt`. The service writes the file under `run/molmo-uploads/` (or `MOLMO_UPLOAD_DIR`), calls MolmoPoint, returns `points` and `generated_text`, then **deletes** the temp file. MolmoPoint’s `x`/`y` are **pixel** coordinates in the source image; [molmo_tool.py](molmo_tool.py) converts them to **0–1** when **Pillow** is installed; the Next app also normalizes for display if the server did not. **`points` may be an empty list** if the user prompt is only a caption (e.g. “describe the image”): the model then omits point markup, and `extract_image_points` has nothing to parse—use a **“where / point to …”** style prompt. If you set `MOLMO_ALLOWED_PATH_PREFIX`, ensure the upload directory resolves under that prefix (or set `MOLMO_UPLOAD_DIR` accordingly).
 - **Clarification:** The `generated_text` field in MolmoPoint’s response (and in `/molmo/localize` JSON) comes from the **Molmo-8B** model inside the MolmoPoint process — the same run that produces `points` via `extract_image_points`. It is **not** output from **Gemma** (llama-server on port 8080). The chat UI uses Gemma separately; the Molmo panel in Next.js is labeled accordingly.
 
 ## System prompt
@@ -16,7 +16,7 @@ FastAPI app (`app.py`) runs an agent built with **`langchain.agents.create_agent
 
 ## Streaming
 
-`POST /chat/stream` uses the agent’s `astream(..., stream_mode="messages")` so streaming stays consistent with tool rounds (you may only see final answer tokens, not the full tool phase).
+`POST /chat/stream` uses the agent’s `astream(..., stream_mode="messages")` so streaming stays consistent with tool rounds. The SSE stream may include `{"token": "..."}` (assistant) and, when `molmo_point_localize` runs, `{"molmo_result": {"points", "generated_text", "device", "model_id" or "error"}}` so clients can show **coordinates**, not just the final assistant text. `POST /chat` includes the same structured data as `molmo_results` when the agent used that tool in the run.
 
 ## OpenAI / Gemma: tool calling
 
