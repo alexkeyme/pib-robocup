@@ -147,6 +147,20 @@ write_next_env() {
   echo "Wrote ${p}"
 }
 
+ensure_run_dirs_owned_by_invoker() {
+  # `install -d` as root (via `sudo ./setup-*.sh`) creates root-owned `run/`, which breaks
+  # dev services started as a normal user (e.g. uv writing temp uploads to `run/molmo-uploads/`).
+  local u="${EUID:-$(id -u)}"
+  if [[ "${u}" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    # Prefer numeric uid/gid for the invoking user (avoids "group not found" edge cases)
+    local su_root_uid su_root_gid
+    su_root_uid="${SUDO_UID:-$(id -u "${SUDO_USER}")}"
+    su_root_gid="$(id -g "${SUDO_USER}")"
+    chown -R "${su_root_uid}:${su_root_gid}" \
+      "${REPO_DIR}/run" "${REPO_DIR}/web" 2>/dev/null || true
+  fi
+}
+
 stop_next_if_pidfile() {
   local pf="${REPO_DIR}/run/next.pid"
   if [[ -f "${pf}" ]]; then
@@ -165,6 +179,7 @@ start_next_dev() {
   require_cmd node
   require_cmd npm
   install -d -m 0755 "${REPO_DIR}/run" "${REPO_DIR}/run/molmo-uploads" "${REPO_DIR}/web"
+  ensure_run_dirs_owned_by_invoker
   stop_next_if_pidfile
   (cd "${REPO_DIR}/web" && npm install)
   write_next_env
