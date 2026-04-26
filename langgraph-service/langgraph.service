@@ -1,0 +1,18 @@
+[Unit]
+Description=LangGraph FastAPI (local OpenAI client to Gemma / llama-server)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_DIR@/langgraph-service
+ExecStart=@REPO_DIR@/langgraph-venv/bin/uvicorn app:app --app-dir @REPO_DIR@/langgraph-service --host 0.0.0.0 --port 8008
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+KillMode=process
+Environment=GEMMA_BASE_URL=http://127.0.0.1:8080/v1
+Environment=GEMMA_PORT=8080
+
+[Install]
+WantedBy=multi-user.target
