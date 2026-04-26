@@ -66,10 +66,24 @@ app.add_middleware(
 
 _agent: Any = None
 
-# Depth maps captured by the OAK-D, keyed by capture id (stem of the saved JPEG).
-# Populated by /chat/stream-with-oak-capture before the agent runs; popped on stream cleanup.
-_OAK_DEPTH_CACHE: dict[str, Any] = {}
-_OAK_DEPTH_LOCK = threading.Lock()
+# OAK-D captures pending consumption by /chat/stream-with-oak-capture-id.
+# capture_id (stem of the JPEG) -> {"path": Path, "depth": np.ndarray, "w": int, "h": int}.
+_OAK_CAPTURES: dict[str, dict[str, Any]] = {}
+_OAK_CAPTURES_LOCK = threading.Lock()
+
+
+def _oak_evict_capture(capture_id: str) -> None:
+    """Pop a cached capture and unlink its JPEG. Safe to call with an unknown id."""
+    with _OAK_CAPTURES_LOCK:
+        entry = _OAK_CAPTURES.pop(capture_id, None)
+    if entry is None:
+        return
+    path = entry.get("path")
+    if isinstance(path, Path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def get_agent(
@@ -545,16 +559,26 @@ async def chat_stream_with_image(
     )
 
 
-@app.post("/chat/stream-with-oak-capture")
-async def chat_stream_with_oak_capture(req: ChatRequest):
-    """Capture a synchronized RGB+depth pair from the OAK-D, then stream the agent's run on it.
+class OakCaptureResponse(BaseModel):
+    capture_id: str
+    image_url: str
+    width: int
+    height: int
 
-    Emits a one-off ``oak_capture`` SSE event first so the UI can render the captured frame,
-    then the usual ``token`` / ``tool_call`` / ``molmo_result`` / ``done`` events. Each point
-    in ``molmo_result`` carries ``depth_m`` (meters) sampled from the depth frame.
+
+@app.post("/oak/capture", response_model=OakCaptureResponse)
+async def oak_capture(discard_capture_id: str | None = None) -> OakCaptureResponse:
+    """Grab one synchronized RGB+depth pair from the OAK-D and cache it for later use.
+
+    Pass ``discard_capture_id`` (query string) to evict a previous capture in the same step
+    (frontend Retake flow). Captures are consumed by ``/chat/stream-with-oak-capture-id``;
+    until then, the JPEG can be fetched at the returned ``image_url``.
     """
+    if discard_capture_id:
+        _oak_evict_capture(discard_capture_id)
+
     try:
-        from oak_camera import OakCamera, OakCameraError, sample_depth
+        from oak_camera import OakCamera, OakCameraError
     except ImportError as e:
         raise HTTPException(
             status_code=503,
@@ -570,36 +594,64 @@ async def chat_stream_with_oak_capture(req: ChatRequest):
         raise HTTPException(status_code=503, detail=f"OAK capture failed: {e!s}") from e
 
     capture_id = rgb_path.stem
-    with _OAK_DEPTH_LOCK:
-        _OAK_DEPTH_CACHE[capture_id] = depth
+    with _OAK_CAPTURES_LOCK:
+        _OAK_CAPTURES[capture_id] = {"path": rgb_path, "depth": depth, "w": w, "h": h}
+    return OakCaptureResponse(
+        capture_id=capture_id,
+        image_url=f"/oak/captures/{rgb_path.name}",
+        width=w,
+        height=h,
+    )
+
+
+@app.delete("/oak/capture/{capture_id}")
+def oak_capture_delete(capture_id: str) -> dict[str, bool]:
+    """Evict a cached OAK capture (used by the modal on cancel)."""
+    _oak_evict_capture(capture_id)
+    return {"ok": True}
+
+
+class OakChatRequest(BaseModel):
+    messages: list[Msg] = Field(min_length=1)
+    capture_id: str = Field(min_length=1)
+
+
+@app.post("/chat/stream-with-oak-capture-id")
+async def chat_stream_with_oak_capture_id(req: OakChatRequest):
+    """Stream the agent over a previously captured OAK-D frame.
+
+    The frame and its aligned depth map must already be in the cache from a prior
+    ``/oak/capture`` call. On stream completion (or error) the cache entry is evicted and
+    the JPEG is unlinked.
+    """
+    with _OAK_CAPTURES_LOCK:
+        entry = _OAK_CAPTURES.get(req.capture_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="unknown or expired capture_id")
+    rgb_path: Path = entry["path"]
+    depth = entry["depth"]
+
+    try:
+        from oak_camera import sample_depth
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"OAK capture unavailable (depthai not importable): {e!s}",
+        ) from e
 
     def depth_lookup(x_norm: float, y_norm: float) -> float | None:
         return sample_depth(depth, x_norm, y_norm)
 
+    chat_req = ChatRequest(messages=req.messages)
+
     async def stream() -> AsyncIterator[str]:
-        first = json.dumps(
-            {
-                "oak_capture": {
-                    "capture_id": capture_id,
-                    "image_url": f"/oak/captures/{rgb_path.name}",
-                    "width": w,
-                    "height": h,
-                }
-            }
-        )
-        yield f"data: {first}\n\n"
         try:
             async for line in _stream_body_with_image(
-                req, str(rgb_path), depth_lookup=depth_lookup
+                chat_req, str(rgb_path), depth_lookup=depth_lookup
             ):
                 yield line
         finally:
-            with _OAK_DEPTH_LOCK:
-                _OAK_DEPTH_CACHE.pop(capture_id, None)
-            try:
-                rgb_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            _oak_evict_capture(req.capture_id)
 
     return StreamingResponse(
         stream(),
@@ -610,10 +662,7 @@ async def chat_stream_with_oak_capture(req: ChatRequest):
 
 @app.get("/oak/captures/{name}")
 def oak_capture_image(name: str):
-    """Serve the just-captured OAK-D JPEG to the UI overlay. The file is unlinked when the
-    accompanying SSE stream finishes, so the frontend should fetch promptly after receiving
-    the ``oak_capture`` event.
-    """
+    """Serve a cached OAK-D JPEG so the modal can preview it before the user sends."""
     if "/" in name or "\\" in name or ".." in name:
         raise HTTPException(status_code=400, detail="invalid name")
     upload_dir = _molmo_upload_dir().resolve()

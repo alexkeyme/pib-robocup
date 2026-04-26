@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WebcamCaptureButton } from "@/components/WebcamCaptureButton";
 import { OakCaptureButton } from "@/components/OakCaptureButton";
 import { ImageWithPointOverlay, type MolmoPoint } from "@/components/ImageWithPointOverlay";
@@ -81,6 +81,8 @@ export function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
+  /** capture_id of an OAK-D frame already cached on the backend, when imageFile came from there. */
+  const [oakCaptureId, setOakCaptureId] = useState<string | null>(null);
   const [composerImagePreviewUrl, setComposerImagePreviewUrl] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +95,18 @@ export function Chat() {
   const listRef = useRef<HTMLDivElement>(null);
   const msgImageUrlsRef = useRef<string[]>([]);
   const nextToolKey = useRef(0);
+
+  /** Webcam, file picker, or "Remove image" — anything that's not an OAK capture clears the id. */
+  const setNonOakImage = useCallback((file: File | null) => {
+    setImageFile(file);
+    setOakCaptureId(null);
+  }, []);
+
+  /** OAK button delivers a (File, capture_id) pair; both are tracked together. */
+  const setOakImage = useCallback((file: File, captureId: string) => {
+    setImageFile(file);
+    setOakCaptureId(captureId);
+  }, []);
 
   const mergedMolmoPointsForOverlay = useMemo((): MolmoPoint[] => {
     const out: MolmoPoint[] = [];
@@ -167,12 +181,6 @@ export function Chat() {
           error?: string;
           done?: boolean;
           molmo_result?: MolmoChatResult;
-          oak_capture?: {
-            capture_id?: string;
-            image_url?: string;
-            width?: number;
-            height?: number;
-          };
           tool_call?: { id?: string; name?: string; args?: string | null };
           tool_result?: { id?: string; name?: string; content?: string };
         };
@@ -182,32 +190,6 @@ export function Chat() {
           continue;
         }
         if (data.error) throw new Error(data.error);
-        if (data.oak_capture?.image_url) {
-          // The captured frame is unlinked when the stream ends, so download a copy now.
-          try {
-            const imgRes = await fetch(`${API_BASE}${data.oak_capture.image_url}`);
-            if (imgRes.ok) {
-              const blob = await imgRes.blob();
-              const url = URL.createObjectURL(blob);
-              msgImageUrlsRef.current.push(url);
-              setMolmoOverlayImageUrl(url);
-              setMessages((prev) => {
-                const next = [...prev];
-                // Attach captured image to the most recent user message
-                for (let i = next.length - 1; i >= 0; i--) {
-                  if (next[i].role === "user" && !next[i].imageUrl) {
-                    next[i] = { ...next[i], imageUrl: url, imageName: "oak-capture.jpg" };
-                    break;
-                  }
-                }
-                return next;
-              });
-            }
-          } catch {
-            // If fetch fails we just don't show the side overlay; the chat still works.
-          }
-          continue;
-        }
         if (data.molmo_result) {
           const mr = data.molmo_result;
           setMolmoResults((prev) => [...prev, mr]);
@@ -319,7 +301,9 @@ export function Chat() {
     setInput("");
 
     const sentImage = imageFile;
+    const sentOakCaptureId = oakCaptureId;
     setImageFile(null);
+    setOakCaptureId(null);
     const sentImageUrl = sentImage ? URL.createObjectURL(sentImage) : undefined;
     if (sentImageUrl) {
       msgImageUrlsRef.current.push(sentImageUrl);
@@ -347,7 +331,21 @@ export function Chat() {
 
     try {
       let res: Response;
-      if (sentImage) {
+      if (sentOakCaptureId) {
+        res = await fetch(`${API_BASE}/chat/stream-with-oak-capture-id`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: historyPayload,
+            capture_id: sentOakCaptureId,
+          }),
+        });
+        if (res.status === 404) {
+          throw new Error(
+            "OAK capture expired or not found on the backend. Take a new capture and try again."
+          );
+        }
+      } else if (sentImage) {
         const fd = new FormData();
         fd.append("file", sentImage);
         fd.append("messages_json", JSON.stringify(historyPayload));
@@ -366,55 +364,6 @@ export function Chat() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ messages: historyPayload }),
         });
-      }
-      await consumeAgentStream(res);
-    } catch (err) {
-      rollbackOnError(err);
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function submitWithOak() {
-    if (sending) return;
-    const text = input.trim();
-    setError(null);
-    setInput("");
-
-    setMolmoOverlayImageUrl(null);
-    const userMsg: Msg = {
-      role: "user",
-      content: text || "What do you see?",
-    };
-    const history: Msg[] = [...messages, userMsg];
-    const historyPayload: ChatPayloadMsg[] = history.map(({ role, content }) => ({
-      role,
-      content,
-    }));
-    setMessages([...history, { role: "assistant", content: "" }]);
-    setMolmoResults([]);
-    setMolmoReplyOverlayVisible(false);
-    setToolCallLog([]);
-    setSending(true);
-    scrollToBottom();
-
-    try {
-      const res = await fetch(`${API_BASE}/chat/stream-with-oak-capture`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: historyPayload }),
-      });
-      if (res.status === 404) {
-        throw new Error(
-          "OAK capture endpoint is unavailable on the running backend. Restart langgraph-service after pulling the latest code."
-        );
-      }
-      if (res.status === 503) {
-        const detail = await res.text();
-        throw new Error(
-          detail ||
-            "OAK-D camera not reachable. Check that it is plugged in and that the udev rule is installed."
-        );
       }
       await consumeAgentStream(res);
     } catch (err) {
@@ -662,7 +611,7 @@ export function Chat() {
               <button
                 type="button"
                 className="rounded border border-foreground/20 px-2 py-1 text-xs text-foreground/80 hover:bg-foreground/5"
-                onClick={() => setImageFile(null)}
+                onClick={() => setNonOakImage(null)}
                 disabled={sending}
               >
                 Remove image
@@ -672,11 +621,12 @@ export function Chat() {
         )}
         <div className="flex flex-wrap items-center gap-2">
           <WebcamCaptureButton
-            onCapture={setImageFile}
+            onCapture={setNonOakImage}
             disabled={sending}
           />
           <OakCaptureButton
-            onTrigger={submitWithOak}
+            apiBase={API_BASE}
+            onCapture={setOakImage}
             disabled={sending}
           />
           <label className="shrink-0 cursor-pointer text-sm text-foreground/55 underline decoration-foreground/25 underline-offset-2 hover:text-foreground/80">
@@ -685,7 +635,7 @@ export function Chat() {
               type="file"
               accept="image/jpeg,image/png,image/webp"
               className="hidden"
-              onChange={(e) => setImageFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => setNonOakImage(e.target.files?.[0] ?? null)}
               disabled={sending}
             />
           </label>
