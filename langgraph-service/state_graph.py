@@ -10,7 +10,7 @@ from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from molmo_tool import call_molmo_point, molmo_point_localize
+from molmo_tool import call_molmo_point, molmo_point_localize, molmo_result_dict_for_json
 
 
 def get_llm() -> ChatOpenAI:
@@ -126,15 +126,7 @@ def _build_uploaded_image_tool(uploaded_image_path: str):
         out = call_molmo_point(uploaded_image_path, effective)
         if isinstance(out, str):
             return out
-        return json.dumps(
-            {
-                "points": out.get("points", []),
-                "generated_text": out.get("generated_text", ""),
-                "device": out.get("device", ""),
-                "model_id": out.get("model_id", ""),
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps(molmo_result_dict_for_json(out), ensure_ascii=False)
 
     return molmo_point_localize_uploaded
 
