@@ -172,8 +172,13 @@ export function Chat() {
         {molmoResults.length > 0 && (
           <div className="space-y-3 rounded-lg border border-foreground/15 bg-foreground/5 p-3">
             <h2 className="text-sm font-medium text-foreground/90">
-              MolmoPoint (tool) — points are normalized 0–1, not from Gemma
+              MolmoPoint (tool) — 0–1 in image space; not from Gemma
             </h2>
+            <p className="text-xs text-foreground/55">
+              Absolute (px) columns are only filled when the API still returns pixel coords; for 0–1
+              only, use the <strong className="text-foreground/70">Molmo (local) upload</strong> panel
+              to see <strong>px</strong> from the known image size.
+            </p>
             {molmoResults.map((m, i) => (
               <div key={i} className="space-y-1.5 text-sm">
                 {m.error && (
@@ -206,22 +211,45 @@ export function Chat() {
                           <th className="p-1.5 pr-2 font-medium">#</th>
                           <th className="p-1.5 pr-2 font-medium">object_id</th>
                           <th className="p-1.5 pr-2 font-medium">image</th>
-                          <th className="p-1.5 pr-2 font-medium">x</th>
-                          <th className="p-1.5 font-medium">y</th>
+                          <th className="p-1.5 pr-2 font-medium">x (0–1)</th>
+                          <th className="p-1.5 pr-2 font-medium">y (0–1)</th>
+                          <th className="p-1.5 pr-2 font-medium" title="From API if pixel coords, else em dash">
+                            x (px)
+                          </th>
+                          <th className="p-1.5 font-medium" title="From API if pixel coords, else em dash">
+                            y (px)
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {m.points.map((p, j) => (
+                        {m.points.map((p, j) => {
+                          const looksPixel = p.x > 1 || p.y > 1;
+                          return (
                           <tr key={j} className="border-b border-foreground/5 last:border-0">
                             <td className="p-1.5 pr-2 tabular-nums text-foreground/80">
                               {j + 1}
                             </td>
                             <td className="p-1.5 pr-2 tabular-nums">{p.object_id}</td>
                             <td className="p-1.5 pr-2 tabular-nums">{p.image_index}</td>
-                            <td className="p-1.5 pr-2 tabular-nums">{formatPointCell(p.x)}</td>
-                            <td className="p-1.5 tabular-nums">{formatPointCell(p.y)}</td>
+                            <td className="p-1.5 pr-2 tabular-nums">
+                              {looksPixel ? "—" : formatPointCell(p.x)}
+                            </td>
+                            <td className="p-1.5 pr-2 tabular-nums">
+                              {looksPixel ? "—" : formatPointCell(p.y)}
+                            </td>
+                            <td className="p-1.5 pr-2 tabular-nums text-foreground/70">
+                              {looksPixel
+                                ? p.x.toFixed(1)
+                                : "—"}
+                            </td>
+                            <td className="p-1.5 tabular-nums text-foreground/70">
+                              {looksPixel
+                                ? p.y.toFixed(1)
+                                : "—"}
+                            </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
