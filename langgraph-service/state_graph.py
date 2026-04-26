@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from molmo_tool import call_molmo_point, molmo_point_localize, molmo_result_dict_for_json
+from system_prompt import SYSTEM_PROMPT
 
 
 def get_llm() -> ChatOpenAI:
@@ -23,11 +24,6 @@ def get_llm() -> ChatOpenAI:
         api_key=api_key,
         temperature=0.7,
     )
-
-
-def _default_system() -> str | None:
-    s = os.environ.get("CHAT_SYSTEM_PROMPT", "").strip()
-    return s or None
 
 
 def _uploaded_image_system(uploaded_image_path: str) -> SystemMessage:
@@ -46,21 +42,13 @@ def _uploaded_image_system(uploaded_image_path: str) -> SystemMessage:
 def prepare_for_model(
     msgs: Sequence[BaseMessage], uploaded_image_path: str | None = None
 ) -> list[BaseMessage]:
-    """Prepend optional system prompt; same semantics for invoke and /chat/stream.
+    """Prepend a per-turn system message describing any uploaded image.
 
-    `create_agent` is built with `system_prompt=None` so this remains the only place
-    we merge `CHAT_SYSTEM_PROMPT` (unless the request already includes a system message).
+    The agent's persistent system prompt is set on ``create_agent`` via
+    ``system_prompt=SYSTEM_PROMPT``; this function only adds the transient
+    note about the uploaded file (when present).
     """
-    for m in msgs:
-        if m.type == "system":
-            out = list(msgs)
-            if uploaded_image_path:
-                out.insert(0, _uploaded_image_system(uploaded_image_path))
-            return out
-    system = _default_system()
     out: list[BaseMessage] = []
-    if system:
-        out.append(SystemMessage(content=system))
     if uploaded_image_path:
         out.append(_uploaded_image_system(uploaded_image_path))
     out.extend(msgs)
@@ -140,5 +128,5 @@ def build_agent(uploaded_image_path: str | None = None):
     return create_agent(
         get_llm(),
         tools=tools,
-        system_prompt=None,
+        system_prompt=SYSTEM_PROMPT,
     )
