@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from collections.abc import Sequence
 
 from langchain.agents import create_agent
@@ -66,11 +67,63 @@ def prepare_for_model(
     return out
 
 
+def _normalize_molmo_upload_prompt(raw: str) -> str:
+    """Turn user-style questions into MolmoPoint-friendly pointing phrasing.
+
+    MolmoPoint is much more likely to emit point markup when the text asks to *point* at
+    something, not a generic "where is …" question. The model may still pass "where is …";
+    we fix that here so the HTTP call is always in a good shape.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return "Point to the object the user is asking about in the image."
+
+    low = s.lower()
+    if low.startswith("point to ") or low.startswith("point at "):
+        return s[0:1].upper() + s[1:] if s else s
+
+    m = re.match(
+        r"^where\s+is\s+(?:the\s+)?(.+?)\s*[\.\?!]*$", s, re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        target = m.group(1).strip()
+        if target.lower().startswith("the "):
+            return f"Point to {target}"
+        return f"Point to the {target}"
+
+    m = re.match(
+        r"^where\s+are\s+(?:the\s+)?(.+?)\s*[\.\?!]*$", s, re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        target = m.group(1).strip()
+        if target.lower().startswith("the "):
+            return f"Point to {target}"
+        return f"Point to the {target}"
+
+    if not low.startswith("point "):
+        if " " not in s and s.replace("-", "").isalnum():
+            return f"Point to the {s}"
+        return f"Point to {s}"
+    return s
+
+
 def _build_uploaded_image_tool(uploaded_image_path: str):
     @tool("molmo_point_localize_uploaded")
     def molmo_point_localize_uploaded(prompt: str) -> str:
-        """Run MolmoPoint on the image uploaded in this chat turn."""
-        out = call_molmo_point(uploaded_image_path, prompt)
+        """Run MolmoPoint on the image uploaded in this chat turn (server-side path; no `image_path` arg).
+
+        **What to pass in `prompt`:** a short description of *what* to point at. The server
+        rewrites common question forms into *pointing* phrasing before calling MolmoPoint.
+
+        **Do not** rely on "where is …" style questions in this field. Prefer one of:
+        - ``Point to the red cup``
+        - ``Point to the left door handle``
+        - ``the mug on the table``  (ok — will be turned into a ``Point to …`` string)
+
+        **Avoid:** long chatty instructions; a noun phrase or a single ``Point to …`` line works best.
+        """
+        effective = _normalize_molmo_upload_prompt(prompt)
+        out = call_molmo_point(uploaded_image_path, effective)
         if isinstance(out, str):
             return out
         return json.dumps(
