@@ -6,16 +6,17 @@ import json
 import mimetypes
 import os
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -65,11 +66,19 @@ app.add_middleware(
 
 _agent: Any = None
 
+# Depth maps captured by the OAK-D, keyed by capture id (stem of the saved JPEG).
+# Populated by /chat/stream-with-oak-capture before the agent runs; popped on stream cleanup.
+_OAK_DEPTH_CACHE: dict[str, Any] = {}
+_OAK_DEPTH_LOCK = threading.Lock()
 
-def get_agent(uploaded_image_path: str | None = None):
+
+def get_agent(
+    uploaded_image_path: str | None = None,
+    depth_lookup: Callable[[float, float], float | None] | None = None,
+):
     global _agent
     if uploaded_image_path:
-        return build_agent(uploaded_image_path)
+        return build_agent(uploaded_image_path, depth_lookup=depth_lookup)
     if _agent is None:
         _agent = build_agent()
     return _agent
@@ -400,7 +409,9 @@ async def _stream_body(req: ChatRequest) -> AsyncIterator[str]:
 
 
 async def _stream_body_with_image(
-    req: ChatRequest, uploaded_image_path: str | None = None
+    req: ChatRequest,
+    uploaded_image_path: str | None = None,
+    depth_lookup: Callable[[float, float], float | None] | None = None,
 ) -> AsyncIterator[str]:
     try:
         lc = _to_lc_messages(req.messages)
@@ -409,7 +420,7 @@ async def _stream_body_with_image(
         yield f"data: {err}\n\n"
         return
     msgs = prepare_for_model(lc, uploaded_image_path)
-    agent = get_agent(uploaded_image_path)
+    agent = get_agent(uploaded_image_path, depth_lookup=depth_lookup)
     upload_dims: tuple[int, int] | None = None
     if uploaded_image_path:
         upload_dims = get_image_dimensions(Path(uploaded_image_path))
@@ -532,3 +543,85 @@ async def chat_stream_with_image(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/chat/stream-with-oak-capture")
+async def chat_stream_with_oak_capture(req: ChatRequest):
+    """Capture a synchronized RGB+depth pair from the OAK-D, then stream the agent's run on it.
+
+    Emits a one-off ``oak_capture`` SSE event first so the UI can render the captured frame,
+    then the usual ``token`` / ``tool_call`` / ``molmo_result`` / ``done`` events. Each point
+    in ``molmo_result`` carries ``depth_m`` (meters) sampled from the depth frame.
+    """
+    try:
+        from oak_camera import OakCamera, OakCameraError, sample_depth
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"OAK capture unavailable (depthai not importable): {e!s}",
+        ) from e
+
+    try:
+        cam = OakCamera.get()
+        rgb_path, depth, w, h = cam.capture(_molmo_upload_dir())
+    except OakCameraError as e:
+        raise HTTPException(status_code=503, detail=f"OAK capture failed: {e!s}") from e
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"OAK capture failed: {e!s}") from e
+
+    capture_id = rgb_path.stem
+    with _OAK_DEPTH_LOCK:
+        _OAK_DEPTH_CACHE[capture_id] = depth
+
+    def depth_lookup(x_norm: float, y_norm: float) -> float | None:
+        return sample_depth(depth, x_norm, y_norm)
+
+    async def stream() -> AsyncIterator[str]:
+        first = json.dumps(
+            {
+                "oak_capture": {
+                    "capture_id": capture_id,
+                    "image_url": f"/oak/captures/{rgb_path.name}",
+                    "width": w,
+                    "height": h,
+                }
+            }
+        )
+        yield f"data: {first}\n\n"
+        try:
+            async for line in _stream_body_with_image(
+                req, str(rgb_path), depth_lookup=depth_lookup
+            ):
+                yield line
+        finally:
+            with _OAK_DEPTH_LOCK:
+                _OAK_DEPTH_CACHE.pop(capture_id, None)
+            try:
+                rgb_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/oak/captures/{name}")
+def oak_capture_image(name: str):
+    """Serve the just-captured OAK-D JPEG to the UI overlay. The file is unlinked when the
+    accompanying SSE stream finishes, so the frontend should fetch promptly after receiving
+    the ``oak_capture`` event.
+    """
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid name")
+    upload_dir = _molmo_upload_dir().resolve()
+    p = (upload_dir / name).resolve()
+    try:
+        p.relative_to(upload_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid name") from None
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(p, media_type="image/jpeg")

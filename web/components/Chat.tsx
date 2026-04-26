@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { WebcamCaptureButton } from "@/components/WebcamCaptureButton";
+import { OakCaptureButton } from "@/components/OakCaptureButton";
 import { ImageWithPointOverlay, type MolmoPoint } from "@/components/ImageWithPointOverlay";
 
 type Role = "user" | "assistant" | "system";
@@ -136,6 +137,179 @@ export function Chat() {
     });
   }
 
+  async function consumeAgentStream(res: Response) {
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || res.statusText);
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("No response body");
+
+    const dec = new TextDecoder();
+    let acc = "";
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += dec.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (!payload) continue;
+        let data: {
+          token?: string;
+          error?: string;
+          done?: boolean;
+          molmo_result?: MolmoChatResult;
+          oak_capture?: {
+            capture_id?: string;
+            image_url?: string;
+            width?: number;
+            height?: number;
+          };
+          tool_call?: { id?: string; name?: string; args?: string | null };
+          tool_result?: { id?: string; name?: string; content?: string };
+        };
+        try {
+          data = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        if (data.error) throw new Error(data.error);
+        if (data.oak_capture?.image_url) {
+          // The captured frame is unlinked when the stream ends, so download a copy now.
+          try {
+            const imgRes = await fetch(`${API_BASE}${data.oak_capture.image_url}`);
+            if (imgRes.ok) {
+              const blob = await imgRes.blob();
+              const url = URL.createObjectURL(blob);
+              msgImageUrlsRef.current.push(url);
+              setMolmoOverlayImageUrl(url);
+              setMessages((prev) => {
+                const next = [...prev];
+                // Attach captured image to the most recent user message
+                for (let i = next.length - 1; i >= 0; i--) {
+                  if (next[i].role === "user" && !next[i].imageUrl) {
+                    next[i] = { ...next[i], imageUrl: url, imageName: "oak-capture.jpg" };
+                    break;
+                  }
+                }
+                return next;
+              });
+            }
+          } catch {
+            // If fetch fails we just don't show the side overlay; the chat still works.
+          }
+          continue;
+        }
+        if (data.molmo_result) {
+          const mr = data.molmo_result;
+          setMolmoResults((prev) => [...prev, mr]);
+          scrollToBottom();
+          continue;
+        }
+        if (data.tool_call) {
+          const tc = data.tool_call;
+          setToolCallLog((prev) => {
+            const id = tc.id;
+            if (id) {
+              const idx = prev.findIndex((e) => e.id === id);
+              if (idx >= 0) {
+                const next = [...prev];
+                const cur = next[idx]!;
+                next[idx] = {
+                  ...cur,
+                  name: tc.name ?? cur.name,
+                  args: tc.args ?? cur.args,
+                };
+                return next;
+              }
+              return [
+                ...prev,
+                { clientKey: `tc-${id}`, id, name: tc.name, args: tc.args ?? undefined },
+              ];
+            }
+            const k = `tmp-${nextToolKey.current++}`;
+            return [
+              ...prev,
+              {
+                clientKey: k,
+                name: tc.name,
+                args: tc.args ?? undefined,
+              },
+            ];
+          });
+          scrollToBottom();
+          continue;
+        }
+        if (data.tool_result) {
+          const tr = data.tool_result;
+          setToolCallLog((prev) => {
+            const id = tr.id;
+            if (id) {
+              const idx = prev.findIndex((e) => e.id === id);
+              if (idx >= 0) {
+                const next = [...prev];
+                const cur = next[idx]!;
+                next[idx] = {
+                  ...cur,
+                  name: tr.name ?? cur.name,
+                  result: tr.content ?? cur.result,
+                };
+                return next;
+              }
+              return [
+                ...prev,
+                {
+                  clientKey: `tr-${id}`,
+                  id,
+                  name: tr.name,
+                  result: tr.content,
+                },
+              ];
+            }
+            const k = `tr-tmp-${nextToolKey.current++}`;
+            return [
+              ...prev,
+              { clientKey: k, name: tr.name, result: tr.content },
+            ];
+          });
+          scrollToBottom();
+          continue;
+        }
+        if (data.token) {
+          acc += data.token;
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant") {
+              last.content = acc;
+            }
+            return next;
+          });
+          scrollToBottom();
+        }
+      }
+    }
+  }
+
+  function rollbackOnError(err: unknown) {
+    setError(err instanceof Error ? err.message : "Request failed");
+    setMessages((prev) => {
+      if (prev.length < 2) return prev;
+      if (prev[prev.length - 1].role === "assistant" && !prev[prev.length - 1].content) {
+        return prev.slice(0, -1);
+      }
+      return prev;
+    });
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
@@ -181,6 +355,11 @@ export function Chat() {
           method: "POST",
           body: fd,
         });
+        if (res.status === 404) {
+          throw new Error(
+            "Image chat endpoint is unavailable on the running backend. Restart langgraph-service to load /chat/stream-with-image."
+          );
+        }
       } else {
         res = await fetch(`${API_BASE}/chat/stream`, {
           method: "POST",
@@ -188,148 +367,58 @@ export function Chat() {
           body: JSON.stringify({ messages: historyPayload }),
         });
       }
-
-      if (!res.ok) {
-        const t = await res.text();
-        if (sentImage && res.status === 404) {
-          throw new Error(
-            "Image chat endpoint is unavailable on the running backend. Restart langgraph-service to load /chat/stream-with-image."
-          );
-        }
-        throw new Error(t || res.statusText);
-      }
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response body");
-
-      const dec = new TextDecoder();
-      let acc = "";
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += dec.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const payload = trimmed.slice(5).trim();
-          if (!payload) continue;
-          let data: {
-            token?: string;
-            error?: string;
-            done?: boolean;
-            molmo_result?: MolmoChatResult;
-            tool_call?: { id?: string; name?: string; args?: string | null };
-            tool_result?: { id?: string; name?: string; content?: string };
-          };
-          try {
-            data = JSON.parse(payload);
-          } catch {
-            continue;
-          }
-          if (data.error) throw new Error(data.error);
-          if (data.molmo_result) {
-            const mr = data.molmo_result;
-            setMolmoResults((prev) => [...prev, mr]);
-            scrollToBottom();
-            continue;
-          }
-          if (data.tool_call) {
-            const tc = data.tool_call;
-            setToolCallLog((prev) => {
-              const id = tc.id;
-              if (id) {
-                const idx = prev.findIndex((e) => e.id === id);
-                if (idx >= 0) {
-                  const next = [...prev];
-                  const cur = next[idx]!;
-                  next[idx] = {
-                    ...cur,
-                    name: tc.name ?? cur.name,
-                    args: tc.args ?? cur.args,
-                  };
-                  return next;
-                }
-                return [
-                  ...prev,
-                  { clientKey: `tc-${id}`, id, name: tc.name, args: tc.args ?? undefined },
-                ];
-              }
-              const k = `tmp-${nextToolKey.current++}`;
-              return [
-                ...prev,
-                {
-                  clientKey: k,
-                  name: tc.name,
-                  args: tc.args ?? undefined,
-                },
-              ];
-            });
-            scrollToBottom();
-            continue;
-          }
-          if (data.tool_result) {
-            const tr = data.tool_result;
-            setToolCallLog((prev) => {
-              const id = tr.id;
-              if (id) {
-                const idx = prev.findIndex((e) => e.id === id);
-                if (idx >= 0) {
-                  const next = [...prev];
-                  const cur = next[idx]!;
-                  next[idx] = {
-                    ...cur,
-                    name: tr.name ?? cur.name,
-                    result: tr.content ?? cur.result,
-                  };
-                  return next;
-                }
-                return [
-                  ...prev,
-                  {
-                    clientKey: `tr-${id}`,
-                    id,
-                    name: tr.name,
-                    result: tr.content,
-                  },
-                ];
-              }
-              const k = `tr-tmp-${nextToolKey.current++}`;
-              return [
-                ...prev,
-                { clientKey: k, name: tr.name, result: tr.content },
-              ];
-            });
-            scrollToBottom();
-            continue;
-          }
-          if (data.token) {
-            acc += data.token;
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (last?.role === "assistant") {
-                last.content = acc;
-              }
-              return next;
-            });
-            scrollToBottom();
-          }
-        }
-      }
+      await consumeAgentStream(res);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed");
-      setMessages((prev) => {
-        if (prev.length < 2) return prev;
-        if (prev[prev.length - 1].role === "assistant" && !prev[prev.length - 1].content) {
-          return prev.slice(0, -1);
-        }
-        return prev;
+      rollbackOnError(err);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function submitWithOak() {
+    if (sending) return;
+    const text = input.trim();
+    setError(null);
+    setInput("");
+
+    setMolmoOverlayImageUrl(null);
+    const userMsg: Msg = {
+      role: "user",
+      content: text || "What do you see?",
+    };
+    const history: Msg[] = [...messages, userMsg];
+    const historyPayload: ChatPayloadMsg[] = history.map(({ role, content }) => ({
+      role,
+      content,
+    }));
+    setMessages([...history, { role: "assistant", content: "" }]);
+    setMolmoResults([]);
+    setMolmoReplyOverlayVisible(false);
+    setToolCallLog([]);
+    setSending(true);
+    scrollToBottom();
+
+    try {
+      const res = await fetch(`${API_BASE}/chat/stream-with-oak-capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: historyPayload }),
       });
+      if (res.status === 404) {
+        throw new Error(
+          "OAK capture endpoint is unavailable on the running backend. Restart langgraph-service after pulling the latest code."
+        );
+      }
+      if (res.status === 503) {
+        const detail = await res.text();
+        throw new Error(
+          detail ||
+            "OAK-D camera not reachable. Check that it is plugged in and that the udev rule is installed."
+        );
+      }
+      await consumeAgentStream(res);
+    } catch (err) {
+      rollbackOnError(err);
     } finally {
       setSending(false);
     }
@@ -507,8 +596,11 @@ export function Chat() {
                           <th className="p-1.5 pr-2 font-medium" title="Pixel x: from API in pixel space, or derived from 0–1 × width when image size is known">
                             x (px)
                           </th>
-                          <th className="p-1.5 font-medium" title="Pixel y: from API in pixel space, or derived from 0–1 × height when image size is known">
+                          <th className="p-1.5 pr-2 font-medium" title="Pixel y: from API in pixel space, or derived from 0–1 × height when image size is known">
                             y (px)
+                          </th>
+                          <th className="p-1.5 font-medium" title="OAK-D depth at point (median over 7×7 ROI). — when not available or out-of-range.">
+                            distance (m)
                           </th>
                         </tr>
                       </thead>
@@ -531,8 +623,11 @@ export function Chat() {
                             <td className="p-1.5 pr-2 tabular-nums text-foreground/70">
                               {Number.isNaN(c.xPx) ? "—" : c.xPx.toFixed(1)}
                             </td>
-                            <td className="p-1.5 tabular-nums text-foreground/70">
+                            <td className="p-1.5 pr-2 tabular-nums text-foreground/70">
                               {Number.isNaN(c.yPx) ? "—" : c.yPx.toFixed(1)}
+                            </td>
+                            <td className="p-1.5 tabular-nums text-foreground/80">
+                              {typeof p.depth_m === "number" ? p.depth_m.toFixed(2) : "—"}
                             </td>
                           </tr>
                           );
@@ -578,6 +673,10 @@ export function Chat() {
         <div className="flex flex-wrap items-center gap-2">
           <WebcamCaptureButton
             onCapture={setImageFile}
+            disabled={sending}
+          />
+          <OakCaptureButton
+            onTrigger={submitWithOak}
             disabled={sending}
           />
           <label className="shrink-0 cursor-pointer text-sm text-foreground/55 underline decoration-foreground/25 underline-offset-2 hover:text-foreground/80">

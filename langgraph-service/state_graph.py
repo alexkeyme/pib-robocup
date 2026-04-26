@@ -3,14 +3,19 @@
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from molmo_tool import call_molmo_point, molmo_point_localize, molmo_result_dict_for_json
+from molmo_tool import (
+    attach_depth_to_tool_payload,
+    call_molmo_point,
+    molmo_point_localize,
+    molmo_result_dict_for_json,
+)
 from system_prompt import SYSTEM_PROMPT
 
 
@@ -95,7 +100,10 @@ def _normalize_molmo_upload_prompt(raw: str) -> str:
     return s
 
 
-def _build_uploaded_image_tool(uploaded_image_path: str):
+def _build_uploaded_image_tool(
+    uploaded_image_path: str,
+    depth_lookup: Callable[[float, float], float | None] | None = None,
+):
     @tool("molmo_point_localize_uploaded")
     def molmo_point_localize_uploaded(prompt: str) -> str:
         """Run MolmoPoint on the image uploaded in this chat turn (server-side path; no `image_path` arg).
@@ -109,20 +117,33 @@ def _build_uploaded_image_tool(uploaded_image_path: str):
         - ``the mug on the table``  (ok — will be turned into a ``Point to …`` string)
 
         **Avoid:** long chatty instructions; a noun phrase or a single ``Point to …`` line works best.
+
+        When the image was captured from the OAK-D depth camera, each point in the result also
+        carries a ``depth_m`` field giving the distance to the object in meters (or ``null`` for
+        depth holes / out-of-range pixels).
         """
         effective = _normalize_molmo_upload_prompt(prompt)
         out = call_molmo_point(uploaded_image_path, effective)
         if isinstance(out, str):
             return out
+        if depth_lookup is not None:
+            attach_depth_to_tool_payload(out, depth_lookup)
         return json.dumps(molmo_result_dict_for_json(out), ensure_ascii=False)
 
     return molmo_point_localize_uploaded
 
 
-def build_agent(uploaded_image_path: str | None = None):
-    """Return a compiled agent graph: Gemma + MolmoPoint localization tool (HTTP to :8010)."""
+def build_agent(
+    uploaded_image_path: str | None = None,
+    depth_lookup: Callable[[float, float], float | None] | None = None,
+):
+    """Return a compiled agent graph: Gemma + MolmoPoint localization tool (HTTP to :8010).
+
+    If ``depth_lookup`` is provided (only meaningful with an uploaded image from the OAK-D),
+    the Molmo tool annotates each returned point with a ``depth_m`` distance in meters.
+    """
     if uploaded_image_path:
-        tools = [_build_uploaded_image_tool(uploaded_image_path)]
+        tools = [_build_uploaded_image_tool(uploaded_image_path, depth_lookup=depth_lookup)]
     else:
         tools = [molmo_point_localize]
     return create_agent(
